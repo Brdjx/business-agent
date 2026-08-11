@@ -6,12 +6,17 @@
  * commit. So what is checked here is that this adapter spells the same boundary
  * in Bedrock's vocabulary — which is the whole reason a second adapter exists.
  *
- * NOT checked, and worth saying plainly: nothing in this port has ever run
- * against Bedrock. The request shape is matched to the one in production in the
- * private original; the usage fold makes an assumption recorded in bedrock.ts.
+ * The retry POLICY is checked here too, because it is the part most likely to be
+ * wrong and the part a unit test can actually reach without credentials. It was
+ * wrong: see the ECONNRESET note in bedrock.ts.
+ *
+ * What is still NOT checked here: the live round trip. This adapter has answered
+ * real questions against Bedrock — the eval suite and every CLI example in the
+ * README ran through it — but that happened by hand, not in this file, and no
+ * assertion here would notice if the wire shape drifted.
  */
 
-import { fromConverseResponse, toConverseRequest } from './bedrock';
+import { fromConverseResponse, toConverseRequest, isRetryable, isTransport } from './bedrock';
 import type { CompletionRequest } from './types';
 
 function request(overrides: Partial<CompletionRequest> = {}): CompletionRequest {
@@ -148,5 +153,64 @@ describe('fromConverseResponse', () => {
     expect(() =>
       fromConverseResponse({ output: { message: { content: [{ reasoningContent: {} }] } } })
     ).toThrow(/reasoningContent/);
+  });
+});
+
+/* ═══ the retry policy ═══ */
+
+describe('what is worth trying again', () => {
+  // A socket reset means the request never reached the service, so nothing was
+  // processed and trying again is safe. This is the case that was missing, and
+  // the eval suite is what found it: two of seventeen cases came back
+  // "ERROR — read ECONNRESET" and were reported as the agent being wrong.
+  it('retries a connection reset, which carries no status and no AWS name', () => {
+    const err = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' });
+    expect(isTransport(err)).toBe(true);
+    expect(isRetryable(err)).toBe(true);
+  });
+
+  it('retries a socket that died mid-response, which carries no code at all', () => {
+    expect(isRetryable(new Error('The pending stream has been canceled'))).toBe(true);
+  });
+
+  // The SDK wraps, so the errno is often a cause or two down.
+  it('finds the errno through a wrapped cause', () => {
+    const inner = Object.assign(new Error('socket failure'), { code: 'EPIPE' });
+    const outer = new Error('Converse failed', { cause: inner });
+    expect(isRetryable(outer)).toBe(true);
+  });
+
+  it('still retries throttling and 5xx by name and by status', () => {
+    expect(isRetryable(Object.assign(new Error('slow down'), { name: 'ThrottlingException' }))).toBe(true);
+    expect(isRetryable({ $metadata: { httpStatusCode: 503 } })).toBe(true);
+    expect(isRetryable({ $metadata: { httpStatusCode: 429 } })).toBe(true);
+  });
+
+  /**
+   * The assertion that stops the fix from being too broad.
+   *
+   * A ValidationException is a malformed request that will fail identically
+   * forever, and its message can easily contain a word from the transient list —
+   * "aborted" is the obvious one. Retrying it three times turns an instant, clear
+   * error into a slow one with the message buried under two pointless attempts.
+   * The transport check therefore runs only when there was no service response.
+   */
+  it('does not retry a validation error, even one whose message says aborted', () => {
+    const err = Object.assign(new Error('Request aborted: invalid tool schema'), {
+      name: 'ValidationException',
+      $metadata: { httpStatusCode: 400 },
+    });
+    expect(isRetryable(err)).toBe(false);
+  });
+
+  it('does not retry credentials or a 404 model id from the other provider', () => {
+    expect(isRetryable(Object.assign(new Error('no credentials'), { name: 'CredentialsProviderError' }))).toBe(false);
+    expect(isRetryable({ $metadata: { httpStatusCode: 404 } })).toBe(false);
+  });
+
+  it('does not treat a permanent DNS failure as transient', () => {
+    // ENOTFOUND is a wrong endpoint or no network; EAI_AGAIN is the transient one.
+    expect(isTransport(Object.assign(new Error('getaddrinfo ENOTFOUND'), { code: 'ENOTFOUND' }))).toBe(false);
+    expect(isTransport(Object.assign(new Error('getaddrinfo EAI_AGAIN'), { code: 'EAI_AGAIN' }))).toBe(true);
   });
 });

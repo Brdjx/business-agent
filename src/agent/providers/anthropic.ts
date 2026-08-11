@@ -23,6 +23,7 @@
  * silently — see `blockFromWire` and the note on thinking below.
  */
 
+import { ProviderUnavailableError } from './types';
 import type {
   Completion,
   CompletionRequest,
@@ -538,8 +539,14 @@ export function createAnthropicProvider(options: AnthropicOptions): Provider {
           // from a 5xx from here.
           const reason = err instanceof Error ? err.message : String(err);
           if (last) {
-            throw new Error(
-              `anthropic request failed after ${maxAttempts} attempts: ${reason}`,
+            // ProviderUnavailableError, not a plain Error: this branch is only
+            // reached when fetch itself threw, so the request never got an answer
+            // and the caller has learned nothing about its own correctness. The
+            // eval suite depends on being able to tell that apart from a wrong
+            // answer — see the note on the class.
+            throw new ProviderUnavailableError(
+              `anthropic could not be reached after ${maxAttempts} attempts: ${reason}`,
+              'anthropic',
               { cause: err }
             );
           }

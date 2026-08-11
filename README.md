@@ -11,11 +11,10 @@ every result, a trace you can read afterwards, and consent that attaches to an a
 rather than to a session. This repository is the synthetic-data extraction of a private
 production system (Fortissimo OS), made public so those parts can be read.
 
-**What runs today: the database, the seeded business, an agent you can ask questions, and
-the full write path — propose, review, approve.** The eval runner is not ported yet. Every claim below carries a
-tag: **in** means the code is in this repository, **to come** means it describes the
-private original and the standard this port is being held to — not something you can run
-here.
+**Everything described below runs.** The database, the seeded business, an agent you can
+ask questions, the full write path — propose, review, approve — and the eval suite that
+measures it: **17 of 17 cases pass** against the synthetic seed, and each run records
+itself so a regression is a query rather than a memory.
 
 ```
 $ npm run ask "how much is outstanding, and how much of it is overdue?"
@@ -116,7 +115,7 @@ regression after a prompt change are different investigations.
 
 ## How it is measured
 
-**Evals are mechanical.** *(to come)* Nothing is scored by asking a model whether an
+**Evals are mechanical.** *(in)* Nothing is scored by asking a model whether an
 answer was good. An assertion is one of: which tools were called; which were *not*; whether
 the answer rests on a row from a named table; whether a phrase that could only be an
 invented fact appears; whether a write was left waiting for approval; how the run stopped.
@@ -277,7 +276,7 @@ races on a primary key rather than on the row.
 | Read tools, every total computed in SQL, evidence on each result | **in** |
 | Two provider adapters: Anthropic over `fetch`, and Bedrock | **in** |
 | Writes: proposals, write-key ledger, precondition re-check | **in** |
-| Eval runner: role binding, mechanical assertions, recorded suites | to come |
+| Eval runner: role binding, mechanical assertions, recorded suites | **in** |
 | A CLI to ask it something: `npm run ask "..."` | **in** |
 
 **In** means the file is here and readable. It does not mean it has been run against a

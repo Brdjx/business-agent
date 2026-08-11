@@ -19,7 +19,9 @@
     "db:check": "docker compose exec -T db psql -v ON_ERROR_STOP=1 -U business_agent -d business_agent -f /dev/stdin < scripts/assert-roles.sql",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "ask": "tsx src/cli.ts"
+    "ask": "tsx src/cli.ts",
+    "eval": "tsx src/agent/evals/run.ts",
+    "eval:history": "tsx src/agent/evals/history.ts"
   },
   "dependencies": {
     "pg": "^8.13.1"

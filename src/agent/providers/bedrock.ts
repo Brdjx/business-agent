@@ -29,6 +29,7 @@
  * being sent where.
  */
 
+import { ProviderUnavailableError } from './types';
 import type {
   Completion,
   CompletionRequest,
@@ -351,12 +352,74 @@ const RETRYABLE_ERRORS = new Set([
   'ModelTimeoutException',
 ]);
 
-function isRetryable(err: unknown): boolean {
+/**
+ * Socket-level failures, which are the most retryable thing there is.
+ *
+ * The request never reached the service, so nothing was processed and trying
+ * again is unambiguously safe — safer than retrying a 500, where the call may
+ * have been carried out before the error came back.
+ *
+ * This was missing, and the eval suite is how it surfaced. Two of seventeen cases
+ * came back `ERROR — read ECONNRESET` and `The pending stream has been canceled`,
+ * and were reported as the agent failing. Neither error carries an AWS exception
+ * name or an `$metadata.httpStatusCode` — there is no service response to carry
+ * them — so the checks below returned false and the first blip threw.
+ *
+ * A suite that reports a dropped connection as a regression is the same defect
+ * the role system exists to fix, one layer down: an infrastructure problem
+ * arriving in the shape of a wrong answer. It is worse here, because a transport
+ * error counted as a failure would also make the flakiness query name the AGENT
+ * as unstable when the network was.
+ *
+ * The Anthropic adapter already did this, in the plainest possible way: any
+ * non-abort throw from `fetch` is transient and retried. The two adapters should
+ * not disagree about resilience, so this brings Bedrock in line.
+ */
+const TRANSIENT_CODES = new Set([
+  'ECONNRESET',
+  'EPIPE',
+  'ETIMEDOUT',
+  'ECONNABORTED',
+  'ENETRESET',
+  'ENETDOWN',
+  'ENETUNREACH',
+  'EHOSTUNREACH',
+  'EAI_AGAIN', // transient DNS, unlike ENOTFOUND
+]);
+
+/** The SDK's wording when the socket dies mid-response. It carries no code. */
+const TRANSIENT_MESSAGES = [
+  'pending stream has been canceled',
+  'socket hang up',
+  'aborted',
+];
+
+export function isTransport(err: unknown): boolean {
+  // The SDK wraps, so the errno can be a cause or two down.
+  for (let e: unknown = err, depth = 0; e && depth < 5; depth++) {
+    const code = (e as { code?: unknown }).code;
+    if (typeof code === 'string' && TRANSIENT_CODES.has(code)) return true;
+    const message = (e as { message?: unknown }).message;
+    if (typeof message === 'string') {
+      const lower = message.toLowerCase();
+      if (TRANSIENT_MESSAGES.some((m) => lower.includes(m))) return true;
+    }
+    e = (e as { cause?: unknown }).cause;
+  }
+  return false;
+}
+
+export function isRetryable(err: unknown): boolean {
   const name = (err as { name?: string })?.name;
   if (name && RETRYABLE_ERRORS.has(name)) return true;
   const status = (err as { $metadata?: { httpStatusCode?: number } })?.$metadata
     ?.httpStatusCode;
-  return status === 429 || (typeof status === 'number' && status >= 500);
+  if (status === 429 || (typeof status === 'number' && status >= 500)) return true;
+  // Checked last, and only when there was no service response at all: a named
+  // ValidationException must keep failing immediately rather than being retried
+  // because its message happens to contain one of the words above.
+  if (status === undefined && isTransport(err)) return true;
+  return false;
 }
 
 const isAbort = (err: unknown): boolean =>
@@ -508,6 +571,17 @@ export function createBedrockProvider(options: BedrockOptions): Provider {
           if (isAbort(err)) throw err;
           const last = attempt >= maxAttempts - 1;
           if (last || !isRetryable(err)) {
+            // Transport exhaustion is reported as unavailability; a service that
+            // answered with a 5xx or throttled us to the end is a different claim
+            // and stays a plain Error. The suite treats only the first as "this
+            // told me nothing about the agent".
+            if (isTransport(err)) {
+              throw new ProviderUnavailableError(
+                describe(err, attempt + 1, maxAttempts),
+                'bedrock',
+                { cause: err }
+              );
+            }
             throw new Error(describe(err, attempt + 1, maxAttempts), { cause: err });
           }
           await sleep(backoffMs(attempt), request.signal);

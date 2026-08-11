@@ -229,3 +229,37 @@ export interface Provider {
   readonly id: string;
   complete(request: CompletionRequest): Promise<Completion>;
 }
+
+/**
+ * The provider could not be reached at all.
+ *
+ * A distinct type because the difference matters to callers, and specifically to
+ * the eval suite. A run that fails because the socket dropped has told you
+ * NOTHING about the agent, and reporting it as a failed case says the opposite of
+ * that. Worse, a suite that records it as a failure makes the flakiness query
+ * name the agent as unstable when the network was — corrupting the one output
+ * that a green suite cannot give you and a history can.
+ *
+ * The adapter raises this, not the caller, because the adapter is the only layer
+ * that knows the difference between "the endpoint refused this request" and "the
+ * connection died on the way there". A caller matching on error strings would be
+ * duplicating a judgment that belongs here, and would drift from it.
+ *
+ * Raised only after the retries are exhausted. A single reset is not an outage.
+ */
+export class ProviderUnavailableError extends Error {
+  override readonly name = 'ProviderUnavailableError';
+  constructor(
+    message: string,
+    /** Which adapter, for a message that says who could not be reached. */
+    readonly providerId: string,
+    options?: { cause?: unknown }
+  ) {
+    super(message, options);
+  }
+}
+
+/** True for an error the adapter classified as "could not reach the provider". */
+export const isProviderUnavailable = (err: unknown): err is ProviderUnavailableError =>
+  err instanceof ProviderUnavailableError ||
+  (err as { name?: string })?.name === 'ProviderUnavailableError';
