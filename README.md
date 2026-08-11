@@ -174,8 +174,9 @@ happened to be run twice by hand in one evening.
 
 ## Getting started
 
-What follows is everything that works today. Needs Docker, and Node 20+ for the npm
-scripts.
+What follows is everything that works today. Needs Docker, and **Node 24** — the current
+Active LTS, which is what `engines` asks for and what CI tests, alongside the current
+release so that whatever breaks in the next LTS is found before it becomes the default.
 
 ```bash
 git clone https://github.com/Brdjx/business-agent.git

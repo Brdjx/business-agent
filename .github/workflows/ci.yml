@@ -37,12 +37,20 @@ jobs:
     name: typecheck and tests (node ${{ matrix.node }})
     runs-on: ubuntu-latest
     strategy:
-      # Both versions, not just one. 20 is the floor in package.json engines and
-      # 22 is what most people actually have; a floor nobody tests is a claim,
-      # and a claim in engines is the kind that fails on someone else's machine.
+      # The LTS floor and the current release, not one version.
+      #
+      # 24 is Active LTS (Krypton) and what package.json engines requires, so it
+      # is the version a claim is being made about — and a floor nobody tests is
+      # a claim rather than a fact. 26 is current but not yet LTS; it is here so
+      # that whatever breaks in it is found now rather than on the day it becomes
+      # the default someone installs.
+      #
+      # 20 used to be in this matrix and was removed: it went end-of-life in
+      # April 2026, so testing it was spending minutes to prove something works
+      # on a runtime nobody should be running.
       fail-fast: false
       matrix:
-        node: ['20', '22']
+        node: ['24', '26']
     steps:
       - uses: actions/checkout@v7
 
@@ -107,7 +115,7 @@ jobs:
       - uses: actions/checkout@v7
       - uses: actions/setup-node@v7
         with:
-          node-version: '22'
+          node-version: '24'
           cache: npm
 
       # A normal install, then the SDK is removed surgically.
