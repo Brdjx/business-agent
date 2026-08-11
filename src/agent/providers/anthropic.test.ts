@@ -125,6 +125,21 @@ describe('toWireRequest', () => {
   it('drops temperature for models that reject it and keeps it for those that do not', () => {
     expect(toWireRequest(request({ model: 'claude-opus-5', temperature: 0 })).temperature).toBeUndefined();
     expect(toWireRequest(request({ model: 'claude-sonnet-4-5', temperature: 0 })).temperature).toBe(0);
+
+    /**
+     * The third one probes the EDGE of the allowlist pattern, not a released model.
+     *
+     * ACCEPTS_TEMPERATURE matches `claude-(opus|sonnet)-4-[0-6]`, so `4-7` is the
+     * first minor version outside it and this asserts the range ends where it is
+     * written to end. Said out loud because an unfamiliar model id in a test reads
+     * as a claim that the model exists and behaves this way, and this file should
+     * not be making claims about a roster it cannot check.
+     *
+     * The direction of the allowlist is what makes that safe: an id nobody
+     * anticipated falls OUTSIDE it and has temperature dropped, which is the
+     * harmless failure. Guessing that a new model accepts temperature is the
+     * failure that breaks every run.
+     */
     expect(toWireRequest(request({ model: 'claude-opus-4-7', temperature: 0 })).temperature).toBeUndefined();
   });
 

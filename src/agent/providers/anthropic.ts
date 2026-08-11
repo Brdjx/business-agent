@@ -160,9 +160,15 @@ const ACCEPTS_TEMPERATURE: RegExp[] = [
  * worse, not better).
  *
  * Turning thinking back on is a change to the boundary — a fourth block type
- * that round-trips verbatim — not a change to this file. Models that cannot
- * disable thinking at all (`claude-fable-5`, `claude-mythos-5`) are therefore
- * not usable here yet; they fail in `blockFromWire` with a sentence saying so.
+ * that round-trips verbatim — not a change to this file. A model whose thinking
+ * cannot be turned off at all is therefore not usable here yet, whichever model
+ * that turns out to be: it fails in `blockFromWire` with a sentence saying so.
+ *
+ * Deliberately not naming those models. An earlier version of this comment listed
+ * two by id, which is a claim about a roster this file cannot check and which goes
+ * stale on its own. The constraint is the durable part — a block this boundary
+ * cannot represent cannot be replayed — and it is stated in terms of the block
+ * rather than the model, so it stays true as the list changes.
  */
 const THINKS_BY_DEFAULT: RegExp[] = [/^claude-opus-5\b/, /^claude-sonnet-5\b/];
 
@@ -308,9 +314,9 @@ function blockFromWire(raw: Record<string, unknown>): ContentBlock {
       'cannot carry: ContentBlock in src/agent/providers/types.ts covers text, tool_use and ' +
       'tool_result only, and a turn replayed without this block is rejected by the API on the ' +
       'next step. If this is a "thinking" block, the model thinks by default and this adapter ' +
-      'did not recognise it as one — see THINKS_BY_DEFAULT in anthropic.ts. Models whose ' +
-      'thinking cannot be turned off (claude-fable-5, claude-mythos-5) are not usable here ' +
-      'until the boundary carries a block that round-trips verbatim.'
+      'did not recognise it as one — see THINKS_BY_DEFAULT in anthropic.ts. A model whose ' +
+      'thinking cannot be turned off is not usable here until the boundary carries a block ' +
+      'that round-trips verbatim.'
   );
 }
 
