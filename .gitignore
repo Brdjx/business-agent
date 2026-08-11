@@ -1,0 +1,23 @@
+node_modules/
+
+# The real one, which holds an API key. .env.example is the committed template
+# and is negated below — the wildcard is here so that .env.local and friends
+# cannot be added later and quietly tracked.
+.env
+.env.*
+!.env.example
+
+# tsc runs with --noEmit, so neither of these should exist. They are listed
+# because a stray `tsc` without the flag produces both, and a committed dist/
+# is a second copy of the source that disagrees with it.
+dist/
+*.tsbuildinfo
+
+coverage/
+
+# OS and tooling noise.
+.DS_Store
+._*
+Thumbs.db
+Desktop.ini
+npm-debug.log*

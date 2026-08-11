@@ -1,0 +1,32 @@
+{
+  "name": "business-agent",
+  "version": "0.1.0",
+  "private": false,
+  "license": "MIT",
+  "description": "An agentic assistant over a small consulting business's records: reads clients, projects, invoices and time entries, proposes writes for per-action approval, and is measured by a mechanical eval suite.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Brdjx/business-agent.git"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "db:up": "docker compose up -d --wait",
+    "db:down": "docker compose down",
+    "db:reset": "docker compose down -v && docker compose up -d --wait",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "pg": "^8.13.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "@types/pg": "^8.11.10",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vitest": "^3.2.4"
+  }
+}

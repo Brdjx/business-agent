@@ -1,0 +1,98 @@
+# Postgres for local development, and nothing else.
+#
+# The agent reads a small business's records out of a database; this is that
+# database. There is no app service here on purpose — the harness runs on the
+# host under tsx, so the only thing worth containerising is the part with state.
+#
+# `npm run db:up` runs `docker compose up -d --wait`, which blocks on the
+# healthcheck below. A zero exit therefore means the schema and the seed have
+# applied, not merely that a container started.
+
+# Pinned rather than inherited from the directory name. Compose defaults the
+# project name to whatever folder the file sits in, so a clone into
+# `business-agent-2` gets its own network and its own volume — two databases,
+# and a `db:reset` in one that leaves the other's stale data in place.
+name: business-agent
+
+services:
+  db:
+    # Pinned to the major version, not `latest`. Postgres has had
+    # gen_random_uuid() in core since 13, which is why nothing under db/ needs
+    # the pgcrypto extension. That assumption should not be able to change
+    # under a clone that worked yesterday.
+    image: postgres:17
+    container_name: business-agent-db
+
+    environment:
+      # Dev-only, and committed deliberately. This database holds synthetic
+      # seed data, listens on localhost, and has one user. Nothing here is a
+      # secret. Keeping it in an uncommitted .env would only mean a stranger
+      # cannot start the thing without being told a password that protects
+      # nothing.
+      POSTGRES_USER: business_agent
+      POSTGRES_PASSWORD: business_agent
+      POSTGRES_DB: business_agent
+
+    ports:
+      # 5433 on the host, not 5432.
+      #
+      # A developer very often already has something on 5432 — a system
+      # postgres, another project's compose. The clash itself is loud (the bind
+      # fails), but the consequence is quiet: a DATABASE_URL pointing at 5432
+      # connects happily to whatever else is listening, and the agent then
+      # answers questions about someone else's database. "No such client" and
+      # "these invoices are from another project" are a much longer debug than
+      # a refused connection.
+      - "5433:5432"
+
+    volumes:
+      # Every .sql in db/ is applied once, in lexical order, on the FIRST boot
+      # of an empty data volume. Hence the numeric prefixes — 001-, 002-, 003-,
+      # then 900-seed, which must sort after every schema file that its inserts
+      # depend on.
+      #
+      # Two consequences worth knowing before they cost an hour:
+      #
+      #   * Editing a file in db/ after the first boot does nothing. The
+      #     entrypoint only runs these scripts when the data directory is
+      #     empty, so a restart brings back the old schema and the new column
+      #     is simply absent. `npm run db:reset` is what applies changes.
+      #
+      #   * If one script fails, the entrypoint aborts and the container exits
+      #     non-zero — but the data directory is already initialised, with the
+      #     earlier scripts applied. The next `up` therefore skips init
+      #     entirely and reports healthy with half a schema. After any failed
+      #     init, reset rather than restart.
+      #
+      # Read-only: the container has no reason to write into the repo, and a
+      # migration rewritten in place by something running as postgres is a
+      # confusing way to lose work.
+      - ./db:/docker-entrypoint-initdb.d:ro
+      - db-data:/var/lib/postgresql/data
+
+    healthcheck:
+      # -h 127.0.0.1 is load-bearing.
+      #
+      # During first boot the entrypoint starts a temporary server with
+      # listen_addresses='' to apply the files in
+      # /docker-entrypoint-initdb.d. That server answers on the unix socket,
+      # so a socket-based pg_isready — the obvious version of this check —
+      # reports ready while the seed is still being inserted, and `--wait`
+      # hands back a database that is missing most of its rows. Over TCP
+      # nothing answers until init has finished and the real server is
+      # listening, which is the state the caller actually wants to wait for.
+      #
+      # $$ escapes to a literal $ for the container's shell, so the names come
+      # from the environment above rather than being repeated here and drifting
+      # out of step with it.
+      test: ["CMD-SHELL", "pg_isready -h 127.0.0.1 -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 2s
+      timeout: 5s
+      retries: 15
+      # Init reads and applies every file in db/, which takes longer than one
+      # interval. Failures inside the start period do not count against
+      # retries, so a slow first boot is not reported as an unhealthy database.
+      start_period: 40s
+
+volumes:
+  db-data:

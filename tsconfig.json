@@ -1,0 +1,78 @@
+// tsconfig is JSONC, so the reasoning can live next to the setting it explains.
+{
+  "compilerOptions": {
+    // Node 20 is the floor declared in package.json, and it runs ES2022
+    // outright. Downlevelling would only make stack traces in a debug session
+    // describe code nobody wrote.
+    "target": "ES2022",
+    "lib": ["ES2022"],
+
+    // ESM, matching "type": "module" in package.json. The two have to agree:
+    // a commonjs setting here with "type": "module" there produces a repo that
+    // typechecks and then fails at runtime on the first import.
+    "module": "ESNext",
+
+    // "bundler" rather than "NodeNext", and this is the one setting here most
+    // likely to be questioned.
+    //
+    // NodeNext is the honest description of pure Node ESM, but it requires a
+    // .js suffix on every relative import — `./budget.js` for a file called
+    // budget.ts. Nothing here emits, tsx and vitest both resolve extensionless
+    // paths, and the cost of getting it wrong is a fresh clone where
+    // `npm run typecheck` fails on import paths rather than on anything the
+    // reader changed. "bundler" accepts both spellings, so neither convention
+    // breaks the build.
+    "moduleResolution": "bundler",
+
+    // Ambient types are opt-in. Left unset, every @types package that lands in
+    // node_modules — including ones pulled in transitively — is loaded into the
+    // global scope of every file, so whether this repo typechecks becomes a
+    // function of the dependency tree rather than of its own source.
+    //
+    // vitest/globals is listed because vitest.config.ts sets globals: true, so
+    // describe/it/expect exist at runtime without an import. The two settings
+    // are a pair: turning globals off there without removing this leaves tests
+    // that typecheck and then throw "describe is not defined".
+    "types": ["node", "vitest/globals"],
+
+    "strict": true,
+
+    // noUncheckedIndexedAccess is deliberately off, and it is the flag this
+    // codebase would most benefit from: `result.rows[0]` from pg is genuinely
+    // possibly-undefined, and treating it otherwise is how a query that
+    // matched nothing turns into a crash three frames away. It stays off
+    // because turning it on across code that is still being written would fail
+    // a fresh clone's typecheck for reasons unrelated to whatever the reader
+    // came to look at. Worth revisiting once src/ has settled.
+
+    // Nothing here is built. tsx runs the TypeScript directly and vitest
+    // transpiles per file, so a dist/ would be a second copy of the source
+    // that can silently disagree with it. tsc is used as a checker only.
+    "noEmit": true,
+
+    // A dependency's own .d.ts errors are not this repo's to fix, and left
+    // unchecked they fail `npm run typecheck` in a way that looks like the
+    // change under review broke something.
+    "skipLibCheck": true,
+
+    // Windows and macOS resolve `./Budget` to budget.ts and Linux does not, so
+    // without this a repo that builds locally fails in CI on a casing typo.
+    "forceConsistentCasingInFileNames": true,
+
+    "esModuleInterop": true,
+    "resolveJsonModule": true,
+
+    // Each file has to be transpilable on its own, because tsx and vitest do
+    // exactly that. Without it, constructs tsc accepts in a whole-program
+    // compile fail at runtime under a per-file transform.
+    "isolatedModules": true,
+
+    "noFallthroughCasesInSwitch": true
+  },
+
+  // Tests included rather than excluded. There is no emit to keep clean, and
+  // a test file that no longer typechecks against the code it tests is exactly
+  // the thing `npm run typecheck` should be catching.
+  "include": ["src"],
+  "exclude": ["node_modules", "dist"]
+}
