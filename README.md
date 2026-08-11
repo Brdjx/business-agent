@@ -394,11 +394,18 @@ happened to be run twice by hand in one evening.
 | A web UI: ask, approval desk, runs and traces, eval history | **in** |
 
 Every row above has been run against a live model and the seeded database, not only
-written: the outputs quoted in this file are transcripts, including the refusals. Two
-things have **not** been exercised and it is worth saying which. The Anthropic adapter is
-the default and has never answered a question here — the port was verified through
-Bedrock, so the wire mapping in `anthropic.ts` is matched to the API by reading it, and its
-tests cover the mapping rather than a round trip. The second gap is closed: the suite has been run
+written: the outputs quoted in this file are transcripts, including the refusals. One thing has **not**
+been exercised and it is worth saying which. The Anthropic adapter is the default and has
+never answered a question here — the port was verified through Bedrock, so the wire mapping
+in `anthropic.ts` is matched to the API by reading it.
+
+That gap is narrowed rather than closed. `src/agent/providers/conformance.test.ts` runs one
+request through BOTH mappers and asserts they carry the same meaning: the same tools with the
+same schemas, the same messages in order, each `tool_use` id threaded to its own result with
+its error flag, the cache breakpoint in the same place. Since the Bedrock mapping is the one
+five recorded suites went through, a defect in the untested mapping would have to be one the
+verified mapping shares. What that cannot catch is a misspelled field name — and that failure
+arrives as an immediate, specific message from the API, which the adapter surfaces verbatim. The second gap is closed: the suite has been run
 against two further datasets in `seeds/` — a larger business where all nine roles bind to
 different records and it is 17/17, and a sparse one where five cases skip with their reasons
 and it exits 0.
