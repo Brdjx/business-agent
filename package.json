@@ -16,11 +16,17 @@
     "db:up": "docker compose up -d --wait",
     "db:down": "docker compose down",
     "db:reset": "docker compose down -v && docker compose up -d --wait",
+    "db:check": "docker compose exec -T db psql -v ON_ERROR_STOP=1 -U business_agent -d business_agent -f /dev/stdin < scripts/assert-roles.sql",
     "typecheck": "tsc --noEmit",
-    "test": "vitest run"
+    "test": "vitest run",
+    "ask": "tsx src/cli.ts"
   },
   "dependencies": {
     "pg": "^8.13.1"
+  },
+  "//optionalDependencies": "Only the bedrock provider imports this, and it does so with a dynamic import, so the default anthropic path never loads it. Optional rather than a plain dependency because an install that pulls an AWS SDK to talk to api.anthropic.com invites the reasonable question of what else is being sent where.",
+  "optionalDependencies": {
+    "@aws-sdk/client-bedrock-runtime": "^3.990.0"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
