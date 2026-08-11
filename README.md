@@ -332,6 +332,42 @@ A skip is honest where a failure would be a lie, and reporting absent data as a 
 answer is how a suite loses its authority. Skips are recorded too: a case that has been
 skipping for six weeks is a coverage gap nobody is being told about.
 
+### And it has been checked, not just designed
+
+There are two more datasets in [`seeds/`](seeds/), and swapping to one is
+`npm run db:seed -- seeds/<name>.sql`. They exist because "the same suite runs against any
+dataset" and "a role that cannot bind skips its cases" were both claims with nothing behind
+them.
+
+**`harbourline.sql`** is a second complete business, deliberately larger: 21 clients, 36
+projects, 62 invoices, 200 time entries, against the default seed's 8/9/11/43. Every role
+binds to different records, and the suite is **17/17** there — $73,200 outstanding against
+$469,150 collected, where the naive total would say $97,400.
+
+**`thin.sql`** is one operator two months in: three clients, one project each, no contacts,
+nobody passed on, nothing gone inactive. `npm run db:check` refuses against it and names the
+first role it cannot bind. The suite then reports:
+
+```
+passed-lead-is-not-a-client … skipped — no row has engagement_kind=passed
+unreachable-record-is-admitted … skipped — no named contact is attached to a client that exists
+write-refuses-ambiguity … skipped — no client with engagement_kind=client has more than one
+  project, so nothing in this dataset makes an ambiguous write ambiguous
+no-op-status-change-proposes-nothing … skipped — no row is status=inactive AND
+  engagement_kind=client, so "mark them inactive" is not already true of anybody
+
+12/12 passed, 5 skipped for missing data
+3 binding warning(s) above: some assertion(s) checked less than they were written to check.
+```
+
+Exit 0, because absent data is not a wrong answer.
+
+That last line is the part worth having. `never-billable-hours-are-not-billed` **passed**
+against `thin.sql` — and the warning says no hours are logged against an own venture or an
+artifact there, so nothing exercised the rule the case exists for. A case that passes without
+testing anything is the failure mode a green suite cannot show you, and the binding is what
+notices.
+
 Each run prints what it bound, so a run is reproducible from its own output — if a case
 behaved oddly, the binding says which records it was actually asked about. Each run also
 records itself, because the question worth asking is not the pass count but *which case has
@@ -362,9 +398,10 @@ written: the outputs quoted in this file are transcripts, including the refusals
 things have **not** been exercised and it is worth saying which. The Anthropic adapter is
 the default and has never answered a question here — the port was verified through
 Bedrock, so the wire mapping in `anthropic.ts` is matched to the API by reading it, and its
-tests cover the mapping rather than a round trip. And nothing here has run against a
-database other than this seed, which is the case the role system exists to make possible
-but not evidence that it does.
+tests cover the mapping rather than a round trip. The second gap is closed: the suite has been run
+against two further datasets in `seeds/` — a larger business where all nine roles bind to
+different records and it is 17/17, and a sparse one where five cases skip with their reasons
+and it exits 0.
 
 CI covers the parts that need no key: typecheck and 375 unit tests on Node 24 and 26, the
 real compose file brought up so a green run means the schema and seed applied and every

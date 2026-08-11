@@ -24,7 +24,9 @@
     "eval:history": "tsx --env-file-if-exists=.env src/agent/evals/history.ts",
     "//env": "--env-file-if-exists rather than --env-file: the flag makes `cp .env.example .env` followed by `npm run ask` work, which is what the README tells a reader to do and what it did not do. The -if-exists form is used so the scripts still run for anyone who exports the variables instead, rather than failing on a file they never wanted.",
     "up": "docker compose up -d --wait",
-    "web": "tsx --env-file-if-exists=.env src/web/server.ts"
+    "web": "tsx --env-file-if-exists=.env src/web/server.ts",
+    "db:seed": "tsx --env-file-if-exists=.env scripts/seed.ts",
+    "db:seed:default": "tsx --env-file-if-exists=.env scripts/seed.ts db/900-seed.sql"
   },
   "dependencies": {
     "pg": "^8.13.1"
