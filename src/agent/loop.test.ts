@@ -17,7 +17,7 @@
 
 import { runAgent, type RunEvent } from './loop';
 import { summarizeTrace } from './trace';
-import { registerTools, type Tool, type ToolContext } from './tools';
+import { registerTools, type ProposalDraft, type Tool, type ToolContext } from './tools';
 import type { Completion, CompletionRequest, Provider, Usage } from './providers/types';
 
 /* ─── the fake provider ─── */
@@ -101,7 +101,46 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /* ─── the tools under the loop ─── */
 
-const seen: { contexts: ToolContext[]; runs: number } = { contexts: [], runs: 0 };
+const seen: { contexts: ToolContext[]; runs: number; writes: string[] } = {
+  contexts: [],
+  runs: 0,
+  // What a write tool actually did. Asserting on `run.proposals` alone cannot
+  // tell a tool that proposed from one that proposed AND wrote, and the second is
+  // the failure worth catching.
+  writes: [],
+};
+
+/* ─── the rows a write resolves to, and the cards it leaves ─── */
+
+const PROJECT = { table: 'projects', id: 'p1', label: 'Dispatch Rewrite' };
+const CLIENT = { table: 'clients', id: 'c1', label: 'Halden Freight' };
+
+/**
+ * The keys are literals rather than `writeKey(...)` calls.
+ *
+ * The loop treats a write key as an opaque string — it is the map key that makes
+ * one act one card — and computing a real one here would pull `write-keys.ts`,
+ * and with it `../db`, into a file that has no database and mocks nothing. What
+ * goes INTO a key is asserted in `write-keys.test.ts`, where it belongs.
+ */
+const LOG_KEY = 'writekey-log-3h-dispatch';
+const STATUS_KEY = 'writekey-halden-inactive';
+
+const LOG_ARGS = { project_name: 'Dispatch', entry_date: '2026-08-04', hours: 3 };
+
+const logDraft = (over: Partial<ProposalDraft> = {}): ProposalDraft => ({
+  toolName: 'test_log_time',
+  args: LOG_ARGS,
+  summary: 'Log 3.00h on 2026-08-04 against Dispatch Rewrite (Halden Freight)',
+  writeKey: LOG_KEY,
+  target: PROJECT,
+  // The rate is pinned though the card never prints it: it is what the client is
+  // eventually billed, and a proposal read at one rate must not be applied at
+  // another.
+  precondition: { table: 'projects', id: 'p1', expect: { rate_cents: '18500' } },
+  evidence: [PROJECT],
+  ...over,
+});
 
 const tool = (over: Partial<Tool> & { name: string }): Tool => ({
   description: 'A tool that exists only in this test file.',
@@ -176,6 +215,50 @@ registerTools([
       evidence: [],
     }),
   }),
+  /**
+   * A write tool shaped the way this repository shapes one: the same tool serves
+   * both modes, and `allowWrites` is the only thing that decides which. With it
+   * off it resolves its target, decides everything it would decide, and returns
+   * the card plus a sentence saying nothing happened.
+   */
+  tool({
+    name: 'test_log_time',
+    run: async (_args, ctx) => {
+      if (ctx.allowWrites) {
+        seen.writes.push('log_time');
+        return { content: 'Logged 3.00h against Dispatch Rewrite.', evidence: [PROJECT] };
+      }
+      return {
+        content:
+          'Nothing has been logged. This would log 3.00h against Dispatch Rewrite, and is ' +
+          'waiting for your approval.',
+        evidence: [PROJECT],
+        proposal: logDraft(),
+      };
+    },
+  }),
+  tool({
+    name: 'test_set_status',
+    run: async (_args, ctx) => {
+      if (ctx.allowWrites) {
+        seen.writes.push('set_client_status');
+        return { content: 'Halden Freight is now inactive.', evidence: [CLIENT] };
+      }
+      return {
+        content: 'Nothing has been changed. This is waiting for your approval.',
+        evidence: [CLIENT],
+        proposal: logDraft({
+          toolName: 'test_set_status',
+          args: { client_name: 'Halden Freight', status: 'inactive' },
+          summary: 'Set Halden Freight from active to inactive',
+          writeKey: STATUS_KEY,
+          target: CLIENT,
+          precondition: { table: 'clients', id: 'c1', expect: { status: 'active' } },
+          evidence: [CLIENT],
+        }),
+      };
+    },
+  }),
 ]);
 
 /**
@@ -197,6 +280,7 @@ const ask = (provider: Provider, over: Partial<Parameters<typeof runAgent>[0]> =
 beforeEach(() => {
   seen.contexts = [];
   seen.runs = 0;
+  seen.writes = [];
 });
 
 /* ─── the four lines ─── */
@@ -547,6 +631,99 @@ describe('what the run carries out with it', () => {
   });
 });
 
+/* ─── consent: a write that was not permitted ─── */
+
+describe('a write with writes off proposes and does not write', () => {
+  it('carries the cards out on the run, in the order they were proposed', async () => {
+    const provider = new FakeProvider([
+      wantsTools([
+        { id: 't1', name: 'test_log_time', input: LOG_ARGS },
+        { id: 't2', name: 'test_set_status', input: { client_name: 'Halden', status: 'inactive' } },
+      ]),
+      answers('Two changes are waiting for you; nothing has changed yet.'),
+    ]);
+    const run = await ask(provider);
+
+    // In the order the model asked for them: a desk that reorders cards is a desk
+    // whose second card is approved on the strength of having read the first.
+    expect(run.proposals.map((p) => p.writeKey)).toEqual([LOG_KEY, STATUS_KEY]);
+    expect(run.proposals[0]!.summary).toContain('Dispatch Rewrite');
+    // The stored call, not the question. This is what would run on approval, so
+    // it has to survive the trip out of the loop unchanged.
+    expect(run.proposals[0]!.args).toEqual(LOG_ARGS);
+    expect(run.proposals[0]!.precondition).toEqual({
+      table: 'projects',
+      id: 'p1',
+      expect: { rate_cents: '18500' },
+    });
+
+    // Nothing was written, and the run says which mode it was in rather than the
+    // caller assuming.
+    expect(seen.writes).toEqual([]);
+    expect(run.writesAllowed).toBe(false);
+    // Every tool saw the same answer. A module-level flag is what breaks here the
+    // day two runs share a process.
+    expect(seen.contexts.every((c) => c.allowWrites === false)).toBe(true);
+
+    // The card is for the operator; the SENTENCE is what stops the model
+    // reporting a write it did not perform, so the model has to have been told.
+    const results = provider.requests[1]!.messages.at(-1)!.content;
+    const texts = results.map((r) => (r.type === 'tool_result' ? r.content : ''));
+    expect(texts[0]).toContain('Nothing has been logged');
+    expect(texts[1]).toContain('Nothing has been changed');
+  });
+
+  it('collapses two proposals of one act into a single card', async () => {
+    const provider = new FakeProvider([
+      wantsTools([{ id: 't1', name: 'test_log_time', input: LOG_ARGS }]),
+      // The model asks again — it does this, having read a result that says
+      // nothing happened and reading it as a failure.
+      wantsTools([{ id: 't2', name: 'test_log_time', input: LOG_ARGS }]),
+      answers('One change is waiting for you.'),
+    ]);
+    const run = await ask(provider);
+
+    // Keyed by write key: asking twice is not consenting twice, and two cards for
+    // one act are two chances to perform it.
+    expect(run.proposals).toHaveLength(1);
+    expect(run.proposals[0]!.writeKey).toBe(LOG_KEY);
+    // The tool ran both times, so the collapse is the loop's doing and not the
+    // tool declining to answer the second call.
+    expect(run.trace.filter((s) => s.toolName === 'test_log_time')).toHaveLength(2);
+  });
+
+  it('performs the write and leaves no card when writes are on', async () => {
+    const provider = new FakeProvider([
+      wantsTools([{ id: 't1', name: 'test_log_time', input: LOG_ARGS }]),
+      answers('Logged.'),
+    ]);
+    const run = await ask(provider, { allowWrites: true });
+
+    // The mirror of the first test, and the reason it is here: `proposals` being
+    // empty has to mean "nothing was left waiting", not "no write tool ran".
+    expect(seen.writes).toEqual(['log_time']);
+    expect(run.proposals).toEqual([]);
+    expect(run.writesAllowed).toBe(true);
+  });
+
+  it('keeps the cards it had when the run stops on a wall', async () => {
+    const provider = new FakeProvider(
+      [wantsTools([{ id: 't1', name: 'test_log_time', input: LOG_ARGS }])],
+      { repeat: true }
+    );
+    const run = await ask(provider, { limits: { maxSteps: 2 } });
+
+    // The wall is still named, and the card is still returned: a proposal the run
+    // got as far as describing is a decision the operator can still make, and
+    // dropping it because a later step ran out of budget would throw away the
+    // useful half of a run that stopped.
+    expect(run.stopReason).toBe('step_limit');
+    expect(run.answer).toContain('2 steps');
+    expect(run.proposals).toHaveLength(1);
+    expect(seen.writes).toEqual([]);
+  });
+});
+
 /* ─── dispatching a turn's calls together ─── */
 
 describe('independent tool calls run together', () => {
@@ -655,6 +832,28 @@ describe('summarizeTrace', () => {
     expect(summary).toContain('1. test_find_invoices');
     expect(summary).toContain('2. model');
     expect(summary).toContain('evidence: clients/Halden Freight, invoices/INV-1008');
+  });
+
+  it('says a card is waiting, and says nothing was changed', async () => {
+    const provider = new FakeProvider([
+      wantsTools([{ id: 't1', name: 'test_log_time', input: LOG_ARGS }]),
+      answers('Waiting on you.'),
+    ]);
+    const summary = summarizeTrace(await ask(provider));
+
+    // The CLI prints this block verbatim, so this line is what puts the card in
+    // front of whoever ran it. A summary alone would read as a receipt, which is
+    // why the sentence carries the disclaimer with it.
+    expect(summary).toContain('waiting for approval: Log 3.00h');
+    expect(summary).toContain('nothing has been changed');
+  });
+
+  it('prints no proposal line at all on a run that proposed nothing', async () => {
+    const summary = summarizeTrace(await ask(new FakeProvider([answers('Nothing is overdue.')])));
+    // Not "proposals: none". A line printed on every read-only run is a line a
+    // reader learns to skip, and then does not read on the run where it said
+    // something.
+    expect(summary).not.toContain('waiting for approval');
   });
 
   it('marks a failed step and does not print an unreported cost as free', async () => {

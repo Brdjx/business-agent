@@ -26,6 +26,7 @@
 
 import { one } from '../db';
 import type { AgentRun } from './loop';
+import { recordProposals, type Proposal } from './proposals';
 
 /**
  * Bound the stored trace.
@@ -78,6 +79,12 @@ export interface PersistOptions {
  *
  * `userId` must be a uuid, because the column is one. A value that is not gets
  * a Postgres error, which is swallowed and logged like any other failure here.
+ *
+ * This records the RUN. A run that left proposals is not fully recorded by it —
+ * the cards are a second table with a foreign key into this one, so they have to
+ * be written after, and `persistRunAndProposals` below is what does both in that
+ * order. A caller that reaches for this one directly on a run with cards on it
+ * writes the reasoning and drops the thing the operator was supposed to decide.
  */
 export async function persistRun(
   userId: string,
@@ -156,6 +163,63 @@ function int(n: number): number {
   return Number.isFinite(n) ? Math.max(0, Math.round(n)) : 0;
 }
 
+/** The whole record of one run: the reasoning, and the cards it left behind. */
+export interface RecordedRun {
+  /** Null when the trace could not be written. The answer is unaffected. */
+  runId: string | null;
+  /**
+   * The cards now on the desk, in the order they were proposed — one per draft
+   * that landed, and fewer than the run proposed if one could not be written.
+   * Each carries the id the operator decides against, which is the only reason
+   * this is returned rather than counted.
+   */
+  proposals: Proposal[];
+}
+
+/**
+ * Record the run, and then the writes it proposed.
+ *
+ * The ORDER is the reason this exists as one function rather than two calls at a
+ * call site. `agent_proposals.run_id` is a foreign key into `agent_runs`, so a
+ * card written first has nothing to point at and the insert is rejected — and
+ * `recordProposals` swallows what it cannot write, which is right (a lost card is
+ * better than a lost answer) and means getting this backwards is silent. The
+ * failure would be the worst-shaped one in this whole path: the run reads as
+ * recorded, and the write the operator was supposed to decide about is nowhere.
+ *
+ * Three smaller judgments, each the opposite of the obvious one:
+ *
+ * **The id used is the one `persistRun` RETURNED**, never `opts.runId`. A
+ * pre-allocated id names a row that exists only if the insert succeeded; passing
+ * it after a failure is how a card gets attached to a run that is not there.
+ *
+ * **A run whose trace could not be written still records its cards**, with a null
+ * `run_id`. The trace is a debugging aid; the card is a question waiting on a
+ * person. Losing the second because the first failed is the wrong way round, and
+ * the desk's read left-joins the run for exactly this row.
+ *
+ * **Never throws.** Both halves swallow and log, like everything else in this
+ * file: by the time this runs the answer is already in hand, and an agent that
+ * answered correctly and then failed while filing the paperwork has turned an
+ * observability problem into an outage.
+ */
+export async function persistRunAndProposals(
+  userId: string,
+  question: string,
+  run: AgentRun,
+  opts: PersistOptions = {}
+): Promise<RecordedRun> {
+  const runId = await persistRun(userId, question, run, opts);
+
+  // Nothing to record, and `recordProposals` is not called at all — not called
+  // with an empty list, so that a read-only run touches `agent_proposals` not
+  // once. It would return an empty array either way; the difference is a
+  // statement about what a question that changes nothing does to the record.
+  if (run.proposals.length === 0) return { runId, proposals: [] };
+
+  return { runId, proposals: await recordProposals(userId, runId, run.proposals) };
+}
+
 /**
  * A one-line summary per step, for reading a run at a glance.
  *
@@ -166,6 +230,10 @@ function int(n: number): number {
  * answered is part of reading a run: a regression after a model change and a
  * regression after a prompt change are different investigations, and the trace
  * is where that gets settled.
+ *
+ * A run that proposed a write ends with one line per card. That is what puts the
+ * card in front of whoever ran the CLI, which prints this block verbatim — and a
+ * proposal nobody sees is a proposal nobody approves.
  */
 export function summarizeTrace(run: AgentRun): string {
   const lines = run.trace.map((s) => {
@@ -193,6 +261,16 @@ export function summarizeTrace(run: AgentRun): string {
     run.evidence.length > 0
       ? `  evidence: ${run.evidence.map((e) => `${e.table}/${e.label}`).join(', ')}`
       : '  evidence: none',
+    // One line per card, and NO line when there are none. `proposals: none` on
+    // every read-only run is a line a reader learns to skip, and then does not
+    // read on the run where it said something — where `evidence: none` earns its
+    // place by being the one thing worth knowing about the answer above it.
+    //
+    // The sentence carries "nothing has been changed" rather than only the
+    // summary, because a summary alone reads as a receipt: "Log 3.00h against
+    // Dispatch Rewrite" printed under a trace looks exactly like a report that it
+    // was logged.
+    ...run.proposals.map((p) => `  waiting for approval: ${p.summary} — nothing has been changed`),
   ].join('\n');
 }
 

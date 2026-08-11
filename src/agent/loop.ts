@@ -12,28 +12,44 @@
  * loop is small on purpose — the interesting parts are the guards. If this file
  * grows, it is usually a guard that has been written in the wrong place.
  *
- * ── What this phase does NOT have, and where it will go ──
+ * ── Writes leave the run as cards, and are not written here ──
+ *
+ * A write tool that is not permitted to act resolves its target, decides
+ * everything it would decide, and returns a `proposal` on its result instead of
+ * writing. This loop collects those the way it collects evidence, keyed by write
+ * key — so a model that proposes the same act twice in one run produces one card
+ * rather than two of the same — and hands them out on `AgentRun.proposals` in the
+ * order they were proposed.
+ *
+ * What it deliberately does NOT do is persist them. `agent_proposals.run_id` is a
+ * foreign key into `agent_runs`, and this run has no id until `persistRun` has
+ * written the row: the record has to be written first and the cards after. Both
+ * belong to whoever is recording — `persistRunAndProposals` in `trace.ts` — and a
+ * loop that inserted its own cards would have to either invent an id or drop the
+ * provenance that makes a card explainable.
+ *
+ * ── What this phase still does NOT have, and where it will go ──
  *
  * The private original loads conversation history and durable notes before the
- * first model call, and carries write proposals out of the run. None of that is
- * here, and none of it is stubbed: there is no thread id, no note block, no
- * `proposals` array that is always empty. A field that is always empty is a
- * field every caller learns to ignore, and then the day it is populated nobody
- * reads it.
+ * first model call. Neither is here, and neither is stubbed: there is no thread
+ * id and no note block. A field that is always empty is a field every caller
+ * learns to ignore, and then the day it is populated nobody reads it.
  *
- * What the next phases add, so the shape is not a surprise:
- *   - writes: `ToolResult` grows a `proposal`, and this loop collects them the
- *     way it collects evidence (keyed by write key, so a model that proposes
- *     the same act twice in one run produces one card). `ToolContext` grows a
- *     `runId` so the idempotency ledger can point at the run that made it.
- *   - memory: notes are loaded before the first call and rendered into a second
- *     system block, AFTER the cache breakpoint — which is why `system` is
- *     already a list here rather than a string. Conversation history arrives as
- *     leading `messages`.
+ * When memory lands, notes are loaded before the first call and rendered into a
+ * second system block, AFTER the cache breakpoint — which is why `system` is
+ * already a list here rather than a string. Conversation history arrives as
+ * leading `messages`.
  */
 
 import { Budget, type BudgetLimits, type StopReason } from './budget';
-import { executeTool, toolSpecs, type Evidence, type ToolContext, type ToolResult } from './tools';
+import {
+  executeTool,
+  toolSpecs,
+  type Evidence,
+  type ProposalDraft,
+  type ToolContext,
+  type ToolResult,
+} from './tools';
 import type { ContentBlock, Message, Provider, SystemBlock } from './providers/types';
 
 /**
@@ -154,9 +170,13 @@ export type RunEvent =
 
 export interface AgentRun {
   answer: string;
-  /** Whether this run was permitted to change anything. There are no write
-   * tools yet, so this is always the mode it was asked for and never a claim
-   * that something changed. */
+  /**
+   * Whether this run was permitted to change anything.
+   *
+   * The mode the run was ASKED for, and never a claim that something changed. A
+   * read-only run can still leave cards; a write-enabled one can still write
+   * nothing, because a tool that finds the value already set has nothing to do.
+   */
   writesAllowed: boolean;
   stopReason: StopReason;
   /** Plain-language reason, safe to show a person. */
@@ -166,6 +186,20 @@ export interface AgentRun {
   ms: number;
   /** Every record the answer was allowed to rest on. */
   evidence: Evidence[];
+  /**
+   * Writes this run described and did not perform, each approvable on its own,
+   * in the order they were proposed.
+   *
+   * Populated only when a write tool was not permitted to act — with writes on it
+   * wrote instead of proposing, and there is no card. Two drafts with one write
+   * key collapse to one entry: asking twice is not consenting twice.
+   *
+   * Returned rather than recorded here. Nothing has been written to
+   * `agent_proposals` by the time a caller reads this, so a run that is not
+   * persisted has proposed nothing anybody can act on later — see
+   * `persistRunAndProposals` in `trace.ts`.
+   */
+  proposals: ProposalDraft[];
   trace: TraceStep[];
   /**
    * Which model answered, and through which adapter.
@@ -194,6 +228,23 @@ export interface AgentRun {
  * prompt where five rules are CRITICAL has no way to say which one is. Each
  * rule below carries the reason it exists, because the reason is what makes it
  * generalise to the case nobody wrote down.
+ *
+ * ── The write rules, and the sentence that is the whole reason for them ──
+ *
+ * The block about writes is not general caution. The private agent once answered
+ * "I've recorded your decision" having called no tool at all — a completed act
+ * reported in the past tense, indistinguishable from the truth until somebody
+ * looked. So the rule is not "be careful about writes", it is: a write is
+ * something a TOOL RESULT in this conversation says happened, and nothing else
+ * counts as having happened, including a sentence the model itself wrote earlier.
+ *
+ * The prompt says what a proposal is rather than naming the tools that make one,
+ * for the same reason it names no read tool: which tools exist is sent with the
+ * request. It also does not say which mode this run is in. That is deliberate —
+ * everything above the cache breakpoint is identical on every run, and the tool
+ * result is what knows whether the act was performed or left on the desk. A
+ * cached sentence asserting the mode would be a second source of truth about it,
+ * and the wrong one on exactly the run where it mattered.
  *
  * Two lines near the end are not about the business at all, and they are here
  * because the adapter asks thinking OFF (a thinking block cannot round-trip
@@ -253,10 +304,29 @@ is no email, no calendar, no accounting ledger beyond the invoices, no staff, no
 documents, and no lead pipeline. Each question is answered on its own — you
 cannot see earlier conversations, so do not refer to one.
 
-You can only read. Nothing you can call changes anything, so never say you have
-updated, created, logged or sent something, and do not offer to do it later or
-to check back: you cannot act again on your own, and a promise you cannot keep
-is worse than a plain refusal.
+Some tools change records, and you are not the one who decides whether a change
+happens:
+
+- When a write is not permitted, the tool tells you what it WOULD do and leaves a
+  card the operator can approve or decline. Say what would change and that
+  nothing has: a proposal is a question you are asking them, not an action you
+  have deferred.
+- Never say you have logged, created, updated, saved or sent something unless a
+  tool result in THIS conversation said it happened. Reporting a proposal as done
+  is the failure to avoid above all others — it is a false statement about
+  someone's records, and it reads exactly like the truth until they check. An
+  earlier message of your own is not evidence: it records you saying something,
+  not the thing happening.
+- Do not offer to do it later or to check back. You cannot act again on your own,
+  and a promise you cannot keep is worse than a plain refusal.
+- If a card is approved, the exact call you described is what runs. So describe
+  the call — which record, which day, which figure — and not the intention
+  behind it.
+- Never choose on the operator's behalf when a write would cost someone money. If
+  they name a client and that client has several projects, ask which one; do not
+  pick the newest, the likeliest, or the only active one. Narrowing an ambiguous
+  instruction yourself is how the wrong project gets billed, and the person who
+  finds out is the client.
 
 A short sentence saying what you are about to look up is welcome before a tool
 call. Do not describe a call instead of making one — a tool call is the only
@@ -294,10 +364,16 @@ export interface RunOptions {
   model: string;
   limits?: Partial<BudgetLimits>;
   /**
-   * Off by default. There is no write tool in this phase; the flag is passed to
-   * every tool anyway so a read can report honestly on the mode it is in, and
-   * so the write phase does not have to add a field every existing tool was
-   * written without.
+   * Off by default, and there is no caller in this repository that turns it on.
+   *
+   * With it off a write tool describes what it would do and returns a card;
+   * `decideProposal` is what sets it true, for one stored call, after a person has
+   * read that card. So the ordinary run proposes and only the approval path acts —
+   * which is the point of per-action consent, and why nothing here offers a
+   * "writes on" switch that would grant a whole run the permission.
+   *
+   * Passed to every tool either way, so a read can report honestly on the mode it
+   * is in rather than guessing.
    */
   allowWrites?: boolean;
   /** Overrides the per-tool timeout. Exists so the timeout can be exercised by
@@ -352,10 +428,28 @@ export async function runAgent(opts: RunOptions): Promise<AgentRun> {
 
   const trace: TraceStep[] = [];
   const evidence: Evidence[] = [];
+  /**
+   * Keyed by write key, so a model that proposes the same act twice in one run
+   * leaves one card rather than two of the same. A Map rather than an array
+   * because insertion order is preserved and the first draft wins nothing over
+   * the second: two drafts with one key describe one act, so which object
+   * survives cannot matter.
+   */
+  const proposals = new Map<string, ProposalDraft>();
 
   const ctx: ToolContext = {
     userId: opts.userId,
     allowWrites: opts.allowWrites === true,
+    // `runId` is deliberately NOT set here, and its absence is a fact about this
+    // repository rather than an omission. The run's row is written after the run
+    // ends (`agent_runs.answer` and `stop_reason` are NOT NULL, so there is
+    // nothing to insert up front), and both `agent_write_keys.run_id` and
+    // `agent_proposals.run_id` are foreign keys into it. Handing a tool an id for
+    // a row that does not exist yet would not merely lose provenance: the
+    // ledger's claim would fail the foreign key, `claim` would report that it
+    // could not reserve the write, and the write would never happen. The approval
+    // path passes the id of the run that PROPOSED the card, which is a row that
+    // exists — see `decideProposal`.
     // A tool that writes prose calls a model of its own, and the loop never
     // sees that request. Charged here so the run's token figure is the whole
     // cost rather than the part that happened to go through this file. No tool
@@ -623,7 +717,15 @@ export async function runAgent(opts: RunOptions): Promise<AgentRun> {
       // Only a successful call contributes evidence. A refusal has no rows
       // behind it, and evidence is the thing that stops the model pointing at
       // something that was never returned.
-      if (ok) evidence.push(...result.evidence);
+      //
+      // A card is collected on the same condition, and for a sharper reason: a
+      // call that failed decided nothing, so a proposal from one would be a
+      // question about an act nobody worked out. Approving it would re-run a call
+      // that had already refused itself once.
+      if (ok) {
+        evidence.push(...result.evidence);
+        if (result.proposal) proposals.set(result.proposal.writeKey, result.proposal);
+      }
 
       trace.push({
         step: budget.steps,
@@ -674,6 +776,11 @@ export async function runAgent(opts: RunOptions): Promise<AgentRun> {
     tokens: budget.tokens,
     ms: budget.elapsedMs(),
     evidence: dedupe(evidence),
+    // Returned even when the run walled. A card the model got as far as
+    // describing is a decision the operator can still make, and dropping it
+    // because a later step ran out of steps would throw away the useful half of a
+    // run that stopped.
+    proposals: [...proposals.values()],
     trace,
     model: opts.model,
     provider: opts.provider.id,

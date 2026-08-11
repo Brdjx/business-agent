@@ -11,8 +11,8 @@ every result, a trace you can read afterwards, and consent that attaches to an a
 rather than to a session. This repository is the synthetic-data extraction of a private
 production system (Fortissimo OS), made public so those parts can be read.
 
-**What runs today: the database, the seeded business, and a read-only agent you can ask
-questions.** Writes and the eval runner are not ported yet. Every claim below carries a
+**What runs today: the database, the seeded business, an agent you can ask questions, and
+the full write path — propose, review, approve.** The eval runner is not ported yet. Every claim below carries a
 tag: **in** means the code is in this repository, **to come** means it describes the
 private original and the standard this port is being held to — not something you can run
 here.
@@ -74,7 +74,7 @@ the answer every intermediate step is gone. Writing the trace must never fail th
 agent that answered correctly and then died recording itself has turned an observability
 problem into an outage.
 
-**Per-action consent: a write is a proposal.** *(to come)* With writes off, a write tool
+**Per-action consent: a write is a proposal.** *(in)* With writes off, a write tool
 returns what it *would* do and does nothing. The other half of that is a way to say yes to
 *that specific thing*. A proposal is a row holding the validated arguments, the record they
 resolved to, the write key the write will claim, and the facts that were true when it was
@@ -84,13 +84,13 @@ the model decides, and re-resolves the request from scratch: a different project
 a status can have moved. Consent to a sentence is not consent to whatever that sentence
 turns out to mean a minute later.
 
-**An idempotency ledger.** *(to come)* Each write derives a key from its own content and
+**An idempotency ledger.** *(in)* Each write derives a key from its own content and
 claims it; a second attempt with the same key returns the first result instead of writing
 again. A model can call the same tool twice and a retried step can replay a call that
 already succeeded. For a read that is wasteful. For "log four hours against this client"
 it is a double charge against someone real.
 
-**A precondition re-check that names what changed.** *(to come)* A proposal card saying
+**A precondition re-check that names what changed.** *(in)* A proposal card saying
 "active → inactive" is a claim about the present tense. Before the write, the asserted
 columns are read again; if one has moved, the answer is no, and the refusal says what
 moved — "the client is no longer active" — because a bare refusal makes the system look
@@ -223,6 +223,45 @@ spends money on every commit stops being run.
 `npm run db:check` asserts that every eval role can bind against the database, and names
 the role and the reason when one cannot.
 
+### Asking it to change something
+
+A write never happens because you asked. It comes back as a proposal:
+
+```bash
+$ npm run ask "Log 3 hours against Ledgerlight Internal Tooling for today, a cleanup pass. It's billable."
+
+proposed — NOTHING HAS BEEN CHANGED
+  log_time  a64900db
+    Log 3.00h on 2026-08-11 against Ledgerlight Internal Tooling
+      (Ledgerlight — own_venture: the studio's own, never billable) — cleanup pass [not billable]
+    row      projects/Ledgerlight Internal Tooling  71c2bda4-...
+    asserts  name = Ledgerlight Internal Tooling; rate_cents = unset; client_id = 6435c346-...
+    approve  npm run ask -- approve a64900db
+```
+
+Two things happened there. It refused to bill an own venture even though the request said
+billable, and it said so rather than flipping the flag quietly. And nothing was written —
+the row count is unchanged until you approve.
+
+```bash
+$ tsx src/cli.ts proposals        # the pending queue, with the question that produced each
+$ tsx src/cli.ts approve a64900db # applies it; short ids work, like a git sha
+$ tsx src/cli.ts reject a64900db
+```
+
+The `asserts` line is re-read immediately before the write. If one of those facts has
+moved, approving refuses and says which:
+
+```
+not applied — stale
+  Not applied: the invoice changed after this was proposed — amount_cents is now 950000,
+  not 900000. Ask again so the proposal describes what is there now.
+```
+
+Approving the same proposal twice replays the first result instead of writing again — the
+write key is derived from the content of the act and claimed before the write, so a retry
+races on a primary key rather than on the row.
+
 ---
 
 ## Status
@@ -236,7 +275,7 @@ the role and the reason when one cannot.
 | Tools: allowlist, argument validation, evidence | **in** |
 | Read tools, every total computed in SQL, evidence on each result | **in** |
 | Two provider adapters: Anthropic over `fetch`, and Bedrock | **in** |
-| Writes: proposals, write-key ledger, precondition re-check | to come |
+| Writes: proposals, write-key ledger, precondition re-check | **in** |
 | Eval runner: role binding, mechanical assertions, recorded suites | to come |
 | A CLI to ask it something: `npm run ask "..."` | **in** |
 

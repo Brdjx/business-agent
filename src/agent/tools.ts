@@ -28,6 +28,127 @@ export interface Evidence {
   label: string;
 }
 
+/**
+ * The row a card pinned, and what it asserted about that row.
+ *
+ * `table` and `id` freeze WHICH row the operator was shown, and that is not
+ * something the stored call can do on its own. The arguments a tool validated
+ * may still contain a project *name*, so approving re-resolves that name — and
+ * in the hour a card sat on the desk a second project can have come to match it,
+ * or the one that matched can have been renamed. The precondition is what makes
+ * "yes" mean yes to a row.
+ *
+ * `expect` is what the card claimed about that row, re-read immediately before
+ * the write. Two kinds of column belong in it, and the second is the one that
+ * gets forgotten:
+ *
+ * - **What the summary said out loud.** A card reading `active -> inactive` is a
+ *   claim about the present tense. If the status has moved since, applying the
+ *   change would overwrite whatever happened in between.
+ * - **What decides the consequence, even if the card never printed it.** A time
+ *   entry pins its project's `rate_cents`. The card does not show the rate, but
+ *   the rate is what the client is eventually billed, and a proposal read at one
+ *   rate must not be applied at another.
+ *
+ * An empty `expect` means the card pinned nothing beyond the row's existence.
+ * That is a per-tool judgment and it is deliberately not checked against the
+ * summary: nothing verifies that a sentence and a precondition agree (see the
+ * open edges in `docs/design.md`), so a tool that asserts a column in words and
+ * pins nothing produces a card that reads more carefully than it is.
+ */
+export interface Precondition {
+  /**
+   * As spelled in `db/001-business.sql`.
+   *
+   * The approval path will only re-read business tables, and refuses a
+   * precondition naming anything else rather than querying it: the value
+   * arrives from a JSONB column, a column name cannot be a bound parameter, and
+   * a check that cannot be made safely is not a check that passed.
+   */
+  table: string;
+  id: string;
+  /** column -> the value it had when the card was shown. */
+  expect: Record<string, unknown>;
+}
+
+/**
+ * A write that has not happened, in the form approving it later requires.
+ *
+ * With `allowWrites` false a write tool resolves its target, decides everything
+ * it would decide, and returns one of these instead of writing. `recordProposals`
+ * turns it into a row on `agent_proposals`, and approving that row re-runs THIS
+ * call through `executeTool`.
+ *
+ * Which is why every field here is something that must not be re-derived at
+ * approval time. The obvious way to act on a proposal — turn writes on and ask
+ * the question again — grants permission to a session rather than to an action,
+ * and re-resolves the request from scratch: the same words, an hour later, can
+ * mean a different row, or the same row at a different rate. What the operator
+ * agreed to was a sentence about a record, and asking again preserves neither.
+ *
+ * So there is deliberately nothing here that the desk would have to recompute or
+ * reword. The model is not consulted a second time, and anything it would have
+ * to decide again is a way for the applied thing to differ from the approved
+ * thing.
+ */
+export interface ProposalDraft {
+  /** The tool to re-run. A registered name: the approval path looks it up in
+   * this same allowlist, through this same `executeTool`. */
+  toolName: string;
+  /**
+   * The VALIDATED arguments, exactly as this tool's own `validate` returned
+   * them — never the model's raw input.
+   *
+   * They are validated again on the way out, so a row edited by hand cannot
+   * smuggle anything past the tool's checks. Storing the raw input would also
+   * store whatever the validator refused to accept, and the card would then
+   * describe something the tool never agreed to.
+   */
+  args: Record<string, unknown>;
+  /** The sentence the operator reads before deciding. The card is the contract:
+   * what gets applied has to be what this says. */
+  summary: string;
+  /**
+   * Computed here, at propose time, from the RESOLVED ids — see `write-keys.ts`.
+   *
+   * Computing it at propose time is what lets the ledger recognise an approval
+   * and a write-enabled run as one act rather than two, so approving something
+   * that already happened replays the first result instead of doing it twice.
+   */
+  writeKey: string;
+  /**
+   * What the card is ABOUT, stable across revisions. Set it only where a
+   * revision is a real possibility.
+   *
+   * The case that needs it is a tool producing revisable content: ask for a
+   * draft, read it, ask for changes. The second draft is genuinely a different
+   * act and gets a different `writeKey` — that is what stops the ledger
+   * replaying draft one in place of draft two. But left alone the first card
+   * stays on the desk, still pending, still approvable, and approving it applies
+   * the draft that was rejected. A shared subject is what lets the new card
+   * retire the old one without touching the ledger's notion of a distinct write.
+   *
+   * Both write tools in this repository — log a block of time, set a client's
+   * status — have nothing revisable about them, so both leave this unset and the
+   * supersession path never runs. A key invented for every write is a second
+   * identity to keep consistent for no gain.
+   */
+  subjectKey?: string;
+  /** The row this resolved to. The same shape as evidence because it IS
+   * evidence: the record the card rests on, and the row a precondition pins. */
+  target: Evidence;
+  precondition: Precondition;
+  /**
+   * The records the card rests on, stored on the proposal row.
+   *
+   * Kept beside the result's own evidence rather than shared with it: the result
+   * is what this run's model may cite, and this is what the desk shows about a
+   * card nobody has decided yet. They are usually the same rows and they are not
+   * the same claim.
+   */
+  evidence: Evidence[];
+}
+
 export interface ToolResult {
   /**
    * What the model sees. Prose, and kept small — a tool is a lookup, not a data
@@ -45,6 +166,20 @@ export interface ToolResult {
    * tool has something concrete behind it.
    */
   evidence: Evidence[];
+  /**
+   * What this call WOULD have done, when it was not allowed to do it.
+   *
+   * Present only on a write tool's propose path — `allowWrites` false — and
+   * absent on every read, and absent again when the same tool actually performs
+   * the write. A run collects these and hands them to `recordProposals`; nothing
+   * in `executeTool` reads it, because whether a card is kept is the caller's
+   * decision and not the tool's.
+   *
+   * `content` still has to say plainly that nothing happened. The proposal is
+   * for the operator; the sentence is what stops the model reporting a write it
+   * did not perform.
+   */
+  proposal?: ProposalDraft;
 }
 
 /**
@@ -102,6 +237,21 @@ export interface ToolContext {
    * belonged in.
    */
   allowWrites: boolean;
+  /**
+   * The run this call belongs to, when there is one.
+   *
+   * Written onto the idempotency ledger and onto a proposal, so a write and the
+   * reasoning that led to it stay joined: "which run logged these four hours" is
+   * then a query rather than a guess from timestamps. Both columns are
+   * `ON DELETE SET NULL`, so pruning a trace loses the provenance and keeps the
+   * ledger entry that prevents a double write.
+   *
+   * Optional, and legitimately absent twice over. A run that failed to persist
+   * has no id to give, and the approval path passes the id of the run that
+   * *proposed* the card — there is no run for the approval itself, because
+   * approving is a person pressing a button and not the agent taking a turn.
+   */
+  runId?: string;
   /**
    * Charge tokens a tool spent on a model call of its own.
    *

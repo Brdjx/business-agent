@@ -30,11 +30,13 @@
  * how anybody else will build it.
  *
  * So: an explicit, idempotent call, made by every entry point that will reach
- * `executeTool`. There is exactly one such entry point in this phase (whatever
- * asks a question). The write phase adds a second — the path that applies an
- * approved proposal — and it must call this too, without importing the loop.
- * That requirement is the whole point: "may the agent change things" and "may it
- * do this one thing" are different questions and must not share a code path.
+ * `executeTool`. There are two of them now. One asks a question. The other is
+ * `decideProposal`, which applies an approved proposal, calls this itself, and
+ * does not import the loop — that is a requirement rather than an accident of
+ * layering: "may the agent change things" and "may it do this one thing" are
+ * different questions and must not share a code path. `proposals.test.ts`
+ * registers nothing itself and drives that path, so it is the test that notices
+ * if the call there is ever removed.
  *
  * Note what registration does and does not decide. It makes a tool *callable*.
  * Whether a write tool acts or only describes what it would do is `allowWrites`
@@ -44,6 +46,7 @@
 
 import { registerTools } from './tools';
 import { READ_TOOLS } from './tools/read';
+import { WRITE_TOOLS } from './tools/write';
 
 /**
  * Module state, deliberately.
@@ -66,10 +69,13 @@ let done = false;
 export function ensureToolsRegistered(): void {
   if (done) return;
   registerTools([
-    // Read tools only, in this phase. The write tools are a separate array added
-    // to this same call — not a separate registration function, because a second
-    // entry point is a second thing to forget.
+    // One call, two arrays. Not a second registration function for the writes —
+    // a second entry point is a second thing to forget, and forgetting this one
+    // is incident 1 exactly: a registry holding the read tools and nothing else
+    // answers every approval with "there is no tool called log_time", which reads
+    // like an allowlist working rather than like a wiring fault.
     ...READ_TOOLS,
+    ...WRITE_TOOLS,
   ]);
   done = true;
 }
