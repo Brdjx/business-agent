@@ -1,7 +1,7 @@
 # CI
 #
-# Three jobs, because they fail for different reasons and a single red X that
-# could mean any of them is worth less than three that each name their own cause.
+# Four jobs, because they fail for different reasons and a single red X that
+# could mean any of them is worth less than four that each name their own cause.
 #
 # What is deliberately NOT here: the eval suite. It calls a live model, which
 # costs money and needs a key, so running it on every push would either burn the
@@ -44,9 +44,9 @@ jobs:
       matrix:
         node: ['20', '22']
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: ${{ matrix.node }}
           cache: npm
@@ -69,7 +69,7 @@ jobs:
     name: schema, seed, and every eval role
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # The same command the README tells a reader to run. --wait blocks on the
       # container healthcheck, and the healthcheck runs over TCP rather than the
@@ -104,26 +104,32 @@ jobs:
     name: the AWS SDK really is optional
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v7
         with:
           node-version: '22'
           cache: npm
 
-      # The bedrock provider imports @aws-sdk/client-bedrock-runtime through a
-      # dynamic import, so the default anthropic path should never need it. That
-      # is a claim about runtime behaviour, and the only way to keep it true is to
-      # install without it and see.
+      # A normal install, then the SDK is removed surgically.
       #
-      # An install that pulls an AWS SDK in order to talk to api.anthropic.com
-      # invites the reasonable question of what else is being sent where, so this
-      # is worth a job.
-      - run: npm ci --omit=optional
+      # The first version of this job ran `npm ci --omit=optional`, which looked
+      # like the obvious way to test an optionalDependency and was wrong: the flag
+      # strips optional dependencies of EVERY package, not just this one. Vitest
+      # depends on rollup, rollup ships its platform-specific native binary as its
+      # own optionalDependency, and the job failed with
+      # `Cannot find module '@rollup/rollup-linux-x64-gnu'` — nothing to do with
+      # the thing being tested.
+      #
+      # Deleting one directory tests the claim that is actually made: that with the
+      # AWS SDK absent at RUNTIME, the default path still works. That is narrower
+      # and it is the truth being asserted.
+      - run: npm ci
 
-      - name: the SDK is genuinely absent
+      - name: remove the AWS SDK
         run: |
-          if [ -d node_modules/@aws-sdk/client-bedrock-runtime ]; then
-            echo "the AWS SDK was installed despite --omit=optional; it is not an optional dependency"
+          rm -rf node_modules/@aws-sdk
+          if [ -d node_modules/@aws-sdk ]; then
+            echo "::error::the AWS SDK is still present"
             exit 1
           fi
           echo "confirmed absent"
@@ -138,7 +144,7 @@ jobs:
     name: nothing secret, nothing private
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
       # This repository is an extraction from a private production system, and
       # the first review of the scaffold found four real client names that had
