@@ -11,11 +11,35 @@ every result, a trace you can read afterwards, and consent that attaches to an a
 rather than to a session. This repository is the synthetic-data extraction of a private
 production system (Fortissimo OS), made public so those parts can be read.
 
-**What runs today: the database and the seeded business. The agent harness is not ported
-yet.** Every claim below carries a tag. **In** means the file is in this repository.
-**To come** means it describes the private original and the standard this port is being
-held to — not something you can run here. If you clone this today, what you get is a
-Postgres schema and a synthetic business to point an agent at.
+**What runs today: the database, the seeded business, and a read-only agent you can ask
+questions.** Writes and the eval runner are not ported yet. Every claim below carries a
+tag: **in** means the code is in this repository, **to come** means it describes the
+private original and the standard this port is being held to — not something you can run
+here.
+
+```
+$ npm run ask "how much is outstanding, and how much of it is overdue?"
+
++2.8s   → invoice_summary {}
++3.1s   ✓ invoice_summary 284ms — 11 invoice(s) on file.
+
+Outstanding: $33,300.00 across 3 open invoices.
+Overdue: $24,300.00 across 2 invoices:
+  INV-1008 (Halden Freight)         — $16,500.00 — due 2026-07-02, 40 days overdue
+  INV-1009 (Calderwood Diagnostics) —  $7,800.00 — due 2026-07-17, 25 days overdue
+
+evidence
+  invoices/INV-1008  de9bcc24-a04f-456f-8a18-791097d91193
+  invoices/INV-1009  ac9f2695-2e5b-4d53-bacf-06a32fb2cdb5
+  invoices/INV-1010  ec0a881e-7c5e-4572-8623-cc2160415401
+
+answered: 2 step(s), 6,506 tokens, 6558ms, read-only
+```
+
+The seed's own arithmetic says $33,300, so that number is checkable rather than
+impressive. A total written as `status <> 'paid'` returns $40,800 instead, because it
+swallows a void invoice that was reissued and a draft — both seeded specifically to catch
+it. The evidence lines are what let you tell those apart without trusting the prose.
 
 ---
 
@@ -24,7 +48,7 @@ Postgres schema and a synthetic business to point an agent at.
 Each of these is a claim that can be checked against code, rather than a property to be
 taken on faith.
 
-**A fail-closed budget, checked before the spend.** *(to come)* Four limits — model
+**A fail-closed budget, checked before the spend.** *(in)* Four limits — model
 steps, total tokens, wall clock, consecutive tool errors — evaluated *before* the call
 that would spend, because a limit you notice afterwards has already been exceeded. If
 the budget cannot be evaluated, the run stops; an agent that keeps going when its
@@ -32,18 +56,18 @@ accounting is broken is the expensive kind of bug. Hitting a wall is a reported 
 never a silent truncation: the caller gets the name of the wall it hit and the trace
 shows what it had done by then.
 
-**A tool allowlist with argument validation.** *(to come)* A tool call arriving from the
+**A tool allowlist with argument validation.** *(in)* A tool call arriving from the
 model is an untrusted string until it has matched a registered name and its arguments
 have passed that tool's own validator. Nothing else executes. A refusal comes back as a
 tool *result*, not a thrown error, so the model can correct itself instead of the run
 dying on a bad argument.
 
-**Evidence on every tool result.** *(to come)* Each result carries `{table, id, label}`
+**Evidence on every tool result.** *(in)* Each result carries `{table, id, label}`
 for the rows it came from, so an answer can be traced back to records rather than
 believed. That is also what makes a mechanical eval possible: "this answer rests on a
 row from `invoices`" is checkable, where "this answer is good" is not.
 
-**A persisted trace.** *(to come)* Question, every step in order, which tool, what
+**A persisted trace.** *(in)* Question, every step in order, which tool, what
 arguments, what came back, how long, what it cost, and which wall it hit. Without one you
 cannot debug an agent — the model made six calls, one was wrong, and by the time you read
 the answer every intermediate step is gone. Writing the trace must never fail the run: an
@@ -74,8 +98,17 @@ broken. A check that cannot be run is not a check that passed: if the row cannot
 re-read, the write is refused rather than made blind.
 
 The tables these rules write into are in `db/`, and the schema comments say why each
-column exists. The code that uses them is what is being ported. The port talks to the
-Anthropic API directly over `fetch`; the private original runs on Bedrock's Converse API.
+column exists.
+
+**Two provider adapters, both `in`.** The default posts to the Anthropic API with plain
+`fetch` — no SDK, so the dependency list stays honest and the adapter doubles as readable
+documentation of the wire format. The second speaks Bedrock's Converse API, which is what
+the private original runs on and what this port was actually verified against. It exists
+for a reason beyond convenience: a boundary with one implementation behind it is an
+assumption, not an abstraction, and you only find out where it should have been once
+something else has been fitted through it. The AWS SDK is an optional dependency loaded by
+dynamic import, and CI installs without it to keep that true.
+
 Which model answered is recorded per run, because a regression after a model change and a
 regression after a prompt change are different investigations.
 
@@ -176,8 +209,19 @@ those scripts against an empty data directory, so a restart brings back the old 
 `npm run db:reset` (`down -v` then up) is what reapplies them. `npm run db:down` stops the
 container and keeps the data.
 
-**There is no command that runs the agent yet.** `npm test` and `npm run typecheck` are
-defined and cover whatever is under `src/` when you run them.
+Then ask it something:
+
+```bash
+npm run ask "how much is outstanding, and how much of it is overdue?"
+```
+
+That needs a model. Set `ANTHROPIC_API_KEY` and leave `PROVIDER=anthropic`, or set
+`PROVIDER=bedrock` and use the AWS credential chain. `npm test` and `npm run typecheck`
+need neither — the unit tests mock the provider and the database, because a suite that
+spends money on every commit stops being run.
+
+`npm run db:check` asserts that every eval role can bind against the database, and names
+the role and the reason when one cannot.
 
 ---
 
@@ -188,11 +232,13 @@ defined and cover whatever is under `src/` when you run them.
 | Postgres schema — plain `postgres:17`, no extensions, no RLS | **in** |
 | Synthetic seeded business: clients, contacts, projects, invoices, time entries | **in** |
 | Repo furniture: compose file, `.env.example`, npm scripts, MIT | **in** |
-| Harness: the loop, the budget, the trace | to come |
-| Tools: allowlist, argument validation, evidence | to come |
+| Harness: the loop, the budget, the trace | **in** |
+| Tools: allowlist, argument validation, evidence | **in** |
+| Read tools, every total computed in SQL, evidence on each result | **in** |
+| Two provider adapters: Anthropic over `fetch`, and Bedrock | **in** |
 | Writes: proposals, write-key ledger, precondition re-check | to come |
 | Eval runner: role binding, mechanical assertions, recorded suites | to come |
-| Something to ask it a question with | to come |
+| A CLI to ask it something: `npm run ask "..."` | **in** |
 
 **In** means the file is here and readable. It does not mean it has been run against a
 live model in this repository. Where that has not happened, this README will not say it

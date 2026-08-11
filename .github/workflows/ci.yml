@@ -1,0 +1,184 @@
+# CI
+#
+# Three jobs, because they fail for different reasons and a single red X that
+# could mean any of them is worth less than three that each name their own cause.
+#
+# What is deliberately NOT here: the eval suite. It calls a live model, which
+# costs money and needs a key, so running it on every push would either burn the
+# budget or sit skipped and green. It belongs on a manual trigger once the runner
+# lands, and until then this file does not pretend otherwise.
+#
+# What IS here that is easy to leave out: the database job brings up the REAL
+# docker-compose.yml rather than a `services: postgres` block. A service
+# container would test a Postgres that CI configured, which is not the artifact
+# anyone runs. Using the compose file tests the thing in the README: the initdb
+# ordering, the TCP healthcheck, and the seed's own assertions.
+
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+# A second push supersedes the first. Without this, a branch pushed three times
+# runs three full matrices and the useful answer queues behind two stale ones.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # ---------------------------------------------------------------------------
+  checks:
+    name: typecheck and tests (node ${{ matrix.node }})
+    runs-on: ubuntu-latest
+    strategy:
+      # Both versions, not just one. 20 is the floor in package.json engines and
+      # 22 is what most people actually have; a floor nobody tests is a claim,
+      # and a claim in engines is the kind that fails on someone else's machine.
+      fail-fast: false
+      matrix:
+        node: ['20', '22']
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: npm
+
+      # ci, not install: it installs exactly the lockfile and fails if
+      # package.json and the lock have drifted, which is the difference between
+      # testing what will be installed and testing what happened to resolve
+      # today.
+      - run: npm ci
+
+      - run: npm run typecheck
+
+      # No database and no API key. The unit tests mock both on purpose: a suite
+      # that needs infrastructure gets run less, and a suite that spends money
+      # gets run less than that.
+      - run: npm test
+
+  # ---------------------------------------------------------------------------
+  database:
+    name: schema, seed, and every eval role
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # The same command the README tells a reader to run. --wait blocks on the
+      # container healthcheck, and the healthcheck runs over TCP rather than the
+      # unix socket, so a zero exit means the schema AND the seed applied — not
+      # merely that a container started while initdb was still inserting.
+      #
+      # This step therefore also runs the seed's DO-block assertions. If any eval
+      # role cannot bind, or the void/draft invoices that arm the money traps have
+      # gone missing, init aborts, the container exits non-zero, and this fails.
+      - name: docker compose up
+        run: docker compose up -d --wait
+
+      # Asserted again, separately, and this is not redundant: the seed's
+      # assertions only run on first boot of an empty volume, and this file also
+      # has to keep working when pointed at a database this repository did not
+      # seed. It reports which role broke and why, rather than "assertion failed".
+      - name: every eval role binds
+        run: npm run db:check
+
+      # A CI failure without the database's own logs is a puzzle. Only on
+      # failure, because the happy path's logs are noise.
+      - name: postgres logs
+        if: failure()
+        run: docker compose logs db
+
+      - name: tear down
+        if: always()
+        run: docker compose down -v
+
+  # ---------------------------------------------------------------------------
+  optional-dep-is-optional:
+    name: the AWS SDK really is optional
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+          cache: npm
+
+      # The bedrock provider imports @aws-sdk/client-bedrock-runtime through a
+      # dynamic import, so the default anthropic path should never need it. That
+      # is a claim about runtime behaviour, and the only way to keep it true is to
+      # install without it and see.
+      #
+      # An install that pulls an AWS SDK in order to talk to api.anthropic.com
+      # invites the reasonable question of what else is being sent where, so this
+      # is worth a job.
+      - run: npm ci --omit=optional
+
+      - name: the SDK is genuinely absent
+        run: |
+          if [ -d node_modules/@aws-sdk/client-bedrock-runtime ]; then
+            echo "the AWS SDK was installed despite --omit=optional; it is not an optional dependency"
+            exit 1
+          fi
+          echo "confirmed absent"
+
+      # Tests only, not typecheck: the bedrock adapter is allowed to need the
+      # SDK's TYPES at compile time. What must hold is that nothing loads it at
+      # runtime unless that provider is chosen.
+      - run: npm test
+
+  # ---------------------------------------------------------------------------
+  hygiene:
+    name: nothing secret, nothing private
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # This repository is an extraction from a private production system, and
+      # the first review of the scaffold found four real client names that had
+      # followed the reasoning across into public prose. A person catching that
+      # once is luck; the check is cheap.
+      #
+      # It looks for shapes rather than a list of names, deliberately: a denylist
+      # of private clients committed to a public repository would be the leak it
+      # was written to prevent.
+      - name: no committed credentials
+        run: |
+          fail=0
+
+          if git ls-files --error-unmatch .env >/dev/null 2>&1; then
+            echo "::error::.env is tracked; it must stay gitignored"
+            fail=1
+          fi
+
+          # Key shapes, matched against tracked files only. .env.example holds
+          # empty assignments and must keep passing.
+          if git grep -nIE 'sk-ant-[A-Za-z0-9]|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----' -- . ; then
+            echo "::error::something shaped like a credential is committed"
+            fail=1
+          fi
+
+          # A Supabase service-role key is a JWT beginning eyJ. The private
+          # original runs on Supabase, so this is the specific thing most likely
+          # to arrive by copy and paste.
+          if git grep -nIE 'eyJ[A-Za-z0-9_-]{20,}\.eyJ' -- . ; then
+            echo "::error::something shaped like a JWT is committed"
+            fail=1
+          fi
+
+          exit $fail
+
+      # The README tags every claim as in or to come. If a claim graduates
+      # without the tag being updated, the README starts overstating what runs,
+      # which is the one thing that would make a reader stop believing the rest.
+      - name: the README still marks what does not run yet
+        run: |
+          if ! grep -q 'to come' README.md; then
+            echo "::notice::README has no 'to come' tags left — if everything now runs, remove this check with the last one"
+          fi
