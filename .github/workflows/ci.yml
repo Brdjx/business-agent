@@ -87,8 +87,13 @@ jobs:
       # This step therefore also runs the seed's DO-block assertions. If any eval
       # role cannot bind, or the void/draft invoices that arm the money traps have
       # gone missing, init aborts, the container exits non-zero, and this fails.
+      #
+      # `db` is named explicitly. The compose file also has a `web` service now,
+      # and a bare `up --wait` would build that image here — so a broken
+      # Dockerfile would fail the job whose name promises the schema and the seed.
+      # Four jobs that each name their own cause is the point of this file.
       - name: docker compose up
-        run: docker compose up -d --wait
+        run: docker compose up -d --wait db
 
       # Asserted again, separately, and this is not redundant: the seed's
       # assertions only run on first boot of an empty volume, and this file also

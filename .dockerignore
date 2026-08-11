@@ -1,0 +1,25 @@
+# What is not sent to the build daemon.
+#
+# node_modules is the important line. Without it the whole tree is uploaded as
+# build context on every build — slow, and worse than slow: a host tree copied
+# into the image would shadow the platform-specific binaries `npm ci` just
+# installed for alpine, and the failure appears as a native module refusing to
+# load rather than as a stale copy.
+node_modules
+
+# The real .env holds an API key and must never be baked into an image. The
+# container's environment comes from docker-compose.yml.
+.env
+.env.*
+
+.git
+.github
+coverage
+dist
+
+# The database's own files are applied by the postgres container from a bind
+# mount, not by this image, and docs are not part of a running server.
+db
+docs
+scripts
+*.md

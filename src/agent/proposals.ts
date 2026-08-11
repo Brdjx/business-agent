@@ -110,6 +110,24 @@ export type Proposal = {
    * question.
    */
   origin?: string | null;
+  /**
+   * The facts the card asserts about its row, as `{table, id, expect}`.
+   *
+   * Selected by the PENDING read only, and absent everywhere else the same way
+   * `origin` is absent from a freshly inserted row. The desk is the one place a
+   * person is asked to consent to these, and a card shown without them is a
+   * sentence the operator has to take on trust — it is the line that matters
+   * most, so the read that feeds a decision carries it and the read of settled
+   * cards does not (a decided card has a `result`, which is what happened).
+   *
+   * `unknown` rather than `Precondition`, because it is a JSONB column and so it
+   * is whatever is in the row; `readPin` below is how anything reads it. Nothing
+   * outside this file may DECIDE anything from it. `decideProposal` re-reads the
+   * column itself and owns the comparison against the live record — a caller
+   * that checked a precondition of its own would be the bug this whole design
+   * exists to prevent.
+   */
+  precondition?: unknown;
 };
 
 /**
@@ -369,6 +387,12 @@ async function pendingByWriteKey(userId: string, writeKey: string): Promise<Prop
  * business that a broken query is not entitled to make. That exact bug shipped in
  * the original: a join failed, the read returned `data ?? []`, and the desk went
  * blank — and a proposal nobody sees is a proposal nobody approves.
+ *
+ * The pending read also carries `precondition`, and only the pending one does. It
+ * is the facts a person is being asked to consent to, so the read that feeds a
+ * decision selects it; a settled card is described by its `result` instead, and
+ * shipping a JSONB column nobody renders would be work done per page render for
+ * nothing.
  */
 export async function listProposals(
   userId: string,
@@ -384,7 +408,10 @@ export async function listProposals(
         // inner join would silently drop exactly the cards whose run was pruned
         // or never persisted — the ones with the least context, hidden by the
         // query that exists to give them context.
-        `SELECT ${cardColumns('p.')}, r.question AS origin
+        // `p.precondition` is here and not in the recent read below: the asserts
+        // line is the most important line on a card that is waiting, and it is of
+        // no further use once the card is settled.
+        `SELECT ${cardColumns('p.')}, p.precondition, r.question AS origin
            FROM agent_proposals p
            LEFT JOIN agent_runs r ON r.id = p.run_id
           WHERE p.user_id = $1 AND p.status = 'pending'
@@ -657,7 +684,7 @@ async function changedSincePropose(raw: unknown): Promise<string | null> {
   return `the ${noun} changed after this was proposed — ${drifted.join('; ')}.`;
 }
 
-type Pin =
+export type Pin =
   | { kind: 'none' }
   | { kind: 'pinned'; pre: Precondition }
   | { kind: 'unusable'; why: string };
@@ -670,8 +697,17 @@ type Pin =
  * is nothing to compare; that is a per-tool judgment and it proceeds. A
  * precondition that names *part* of a row is not a card that asserted nothing, it
  * is a card whose assertion cannot be evaluated, and it is refused.
+ *
+ * Exported for the desk, which has to PRINT the asserts line — and has to say
+ * what approving would do about it. Sharing this classification rather than
+ * re-deriving it is what stops a card whose precondition cannot be read being
+ * displayed as though it pinned nothing, or vice versa: the two sentences would
+ * be about a decision the display had guessed at. The comparison against the live
+ * record is deliberately NOT exported. That is `changedSincePropose`, it stays
+ * private, and a caller that wanted it is a caller about to check a precondition
+ * somewhere other than immediately before the write.
  */
-function readPin(raw: unknown): Pin {
+export function readPin(raw: unknown): Pin {
   if (raw === null || raw === undefined) return { kind: 'none' };
   if (typeof raw !== 'object' || Array.isArray(raw)) {
     return {

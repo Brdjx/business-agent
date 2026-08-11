@@ -76,9 +76,33 @@
  * failing it until the window rolled past.
  */
 
-import { sql, close } from '../../db';
+import { close } from '../../db';
 import { CASES } from './cases';
-import { ROLES } from './roles';
+/**
+ * The reads, and the two readers for the JSONB columns, live in
+ * `history-reads.ts` — because the web UI's evals surface needs the same five
+ * queries and this file is a script that cannot be imported without running a
+ * report. What is shared is the window, the counting rule and how a stored
+ * column is read; the words below are this medium's own. See that file's header.
+ */
+import {
+  ABSENT_ROLE_MEANS,
+  caseOutcomes,
+  DEFAULT_WINDOW,
+  flakiness,
+  looksLikeRef,
+  MAX_WINDOW,
+  MIN_REF,
+  readBinding,
+  readFailures,
+  recentSuites,
+  shortModel,
+  suiteCases,
+  suitesByRef,
+  type CaseWithSuite,
+  type FlakyRow,
+  type SuiteRow,
+} from './history-reads';
 
 /* ─── exit codes ─── */
 
@@ -99,14 +123,6 @@ const EXIT_USAGE = 2;
 const INVOKE = 'npx tsx --env-file=.env src/agent/evals/history.ts';
 /** Spelled the way `run.ts` spells itself, so the two files' hints agree. */
 const RUNNER = 'npx tsx --env-file=.env src/agent/evals/run.ts';
-
-/** Bigger than any history worth reading, and small enough to be a valid `int`. */
-const MAX_WINDOW = 1_000;
-const DEFAULT_WINDOW = 20;
-
-/** Four, like `approve` in the CLI: `--suite=a1b` is short enough to be a typo of
- * something else, and resolving a typo to a real suite is worse than refusing. */
-const MIN_REF = 4;
 
 /* ─── output ─── */
 
@@ -159,47 +175,6 @@ function clip(text: string, max: number): string {
 }
 
 /**
- * `bedrock/us.anthropic.claude-sonnet-4-5-20250929-v1:0` reads as
- * `bedrock/claude-sonnet-4-5`.
- *
- * Known affixes are TRIMMED rather than a name being extracted with one pattern, so
- * an unfamiliar model id degrades to its full self — long, but true. A single greedy
- * pattern would match part of an id it did not recognise and print something that
- * reads as a model nobody ran, which is worse than a wide column.
- *
- * The region prefixes are listed rather than matched as `^[a-z]{2}\.` (which the
- * private version used): a two-letter prefix rule quietly eats the first segment of
- * any dotted id, including one from a vendor this list has never heard of.
- *
- * The `provider/` prefix is KEPT. `persist.ts` writes `model_id` as
- * `${provider}/${modelId}`, and the same weights reached through two providers are
- * two things worth telling apart in a history — that is half the reason the column
- * carries the provider at all.
- */
-const BEDROCK_REGIONS = /^(us|eu|apac|ap|ca|sa|il|mx)\./;
-const VENDOR = /^anthropic\./;
-/** A release date, optionally with a Bedrock version suffix. */
-const RELEASE = /-\d{8}(-v\d+(:\d+)?)?$/;
-
-/** Not exported: this file is a script, and its interface is the command line. The
- * rule is tested through the column it prints (`history.test.ts`). */
-function shortModel(model: string | null | undefined): string {
-  const full = model?.trim();
-  if (!full) return 'unknown';
-
-  // Split at the FIRST slash only: the provider is one segment, and everything after
-  // it is the id the affix rules apply to.
-  const slash = full.indexOf('/');
-  const prefix = slash === -1 ? '' : full.slice(0, slash + 1);
-  const id = slash === -1 ? full : full.slice(slash + 1);
-
-  const short = id.replace(BEDROCK_REGIONS, '').replace(VENDOR, '').replace(RELEASE, '');
-  // An id that is entirely affix would otherwise print as an empty column, which
-  // reads as a suite that recorded no model at all.
-  return short.length > 0 ? `${prefix}${short}` : full;
-}
-
-/**
  * An instant, in UTC, marked as such.
  *
  * UTC rather than the reader's zone: two suites are compared by their stamps, and a
@@ -232,60 +207,6 @@ function took(from: Date | string, to: Date | string | null): string {
 
 /** Eight characters, the way a short sha is read. Enough to pass back to `--suite`. */
 const shortId = (id: string): string => id.slice(0, 8);
-
-/* ─── the rows, as the columns hold them ─── */
-
-/**
- * `type` rather than `interface`, and that is load-bearing: `sql<T>` constrains `T`
- * to pg's `QueryResultRow`, which is an index signature, and TypeScript gives an
- * implicit index signature to object type aliases and not to interfaces. Same
- * reasoning as `Proposal` in `src/agent/proposals.ts`, and the same choice of column
- * names over camel case, so the SQL below is checkable against
- * `db/003-eval-history.sql` by eye.
- */
-type SuiteRow = {
-  id: string;
-  started_at: Date;
-  finished_at: Date | null;
-  model_id: string | null;
-  git_sha: string | null;
-  /** Written when the suite OPENED, counting every case attempted. */
-  total: number;
-  passed: number;
-  failed: number;
-  skipped: number;
-  /** The binding, verbatim, as the runner stored it. Shape not assumed — see
-   * `bindingLines`. */
-  roles: unknown;
-};
-
-type CaseRow = {
-  case_id: string;
-  question: string | null;
-  passed: boolean;
-  skipped: boolean;
-  note: string | null;
-  /** `[{ check, detail }]`, per the schema. Read defensively all the same. */
-  failures: unknown;
-  duration_ms: number | null;
-  created_at: Date;
-  agent_run_id: string | null;
-  suite_id: string;
-};
-
-/** A case row joined to the suite it belongs to, for the per-case view. */
-type CaseWithSuite = CaseRow & { git_sha: string | null };
-
-type FlakyRow = {
-  case_id: string;
-  runs: number;
-  passes: number;
-  failures: number;
-  skips: number;
-  last_seen: Date;
-  /** Non-null means the same case produced both verdicts inside the window. */
-  flaky_since: Date | null;
-};
 
 /* ─── arguments ─── */
 
@@ -422,7 +343,7 @@ function parse(argv: string[]): View | { error: string } {
           'be widened, so the flag would read as having been honoured when it was ignored.',
       };
     }
-    if (suiteRef.length < MIN_REF || !/^[0-9a-f-]+$/i.test(suiteRef)) {
+    if (!looksLikeRef(suiteRef)) {
       return {
         error:
           `--suite=${suiteRef} is not a uuid or a prefix of one (hex and dashes, at least ` +
@@ -469,55 +390,6 @@ function readEnv(): { userId: string } | { error: string } {
     };
   }
   return { userId };
-}
-
-/* ─── reads ─── */
-
-/**
- * The window: most recent N suites for this operator.
- *
- * `started_at DESC, id DESC` — the tie-break matters. Two suites started inside the
- * same millisecond (a suite that failed to open and was rerun immediately) would
- * otherwise be ordered by whatever the heap returned, so the same window could drop
- * a different one of the pair on two reads. `agent_eval_flaky` has the same
- * exposure and takes the same rows either way, because it only needs the set.
- */
-async function recentSuites(userId: string, limit: number): Promise<SuiteRow[]> {
-  return sql<SuiteRow>(
-    `SELECT id, started_at, finished_at, model_id, git_sha,
-            total, passed, failed, skipped, roles
-       FROM agent_eval_suites
-      WHERE user_id = $1
-      ORDER BY started_at DESC, id DESC
-      LIMIT $2`,
-    [userId, limit]
-  );
-}
-
-/**
- * Stability, from the function that owns the counting rule.
- *
- * The counts are BIGINT and would arrive as strings, which is how `skips === runs`
- * becomes a string comparison and `failures > 0` becomes a coercion. Cast here, at
- * the boundary, rather than parsed at each use — a count of eval rows cannot come
- * near an int's range.
- *
- * No `ORDER BY` of its own, deliberately. The function orders unstable first, then
- * most-failing, and re-sorting here would mean copying the predicate it owns into
- * this file — the one duplication the schema comment specifically warns about.
- */
-async function flakiness(userId: string, window: number): Promise<FlakyRow[]> {
-  return sql<FlakyRow>(
-    `SELECT case_id,
-            runs::int     AS runs,
-            passes::int   AS passes,
-            failures::int AS failures,
-            skips::int    AS skips,
-            last_seen,
-            flaky_since
-       FROM agent_eval_flaky($1, $2)`,
-    [userId, window]
-  );
 }
 
 /* ─── the default view ─── */
@@ -691,32 +563,7 @@ async function overview(userId: string, window: number): Promise<number> {
 /* ─── one case over time ─── */
 
 async function caseHistory(userId: string, caseId: string, window: number): Promise<number> {
-  /**
-   * One query, joined against the same window `agent_eval_flaky` uses — the private
-   * version read the suites, collected their ids and sent them back as an `.in()`
-   * list, which is two round trips and a window defined in JavaScript.
-   *
-   * `created_at DESC, id DESC`: without the tie-break, two rows written in the same
-   * millisecond change places between reads, and "newest first" that reorders is not
-   * a history anybody can quote from.
-   */
-  const rows = await sql<CaseWithSuite>(
-    `WITH recent AS (
-       SELECT id, git_sha
-         FROM agent_eval_suites
-        WHERE user_id = $1
-        ORDER BY started_at DESC, id DESC
-        LIMIT $2
-     )
-     SELECT e.case_id, e.question, e.passed, e.skipped, e.note, e.failures,
-            e.duration_ms, e.created_at, e.agent_run_id, e.suite_id,
-            s.git_sha
-       FROM agent_eval_runs e
-       JOIN recent s ON s.id = e.suite_id
-      WHERE e.case_id = $3
-      ORDER BY e.created_at DESC, e.id DESC`,
-    [userId, window, caseId]
-  );
+  const rows: CaseWithSuite[] = await caseOutcomes(userId, caseId, window);
 
   if (rows.length === 0) {
     out('');
@@ -805,24 +652,14 @@ async function caseHistory(userId: string, caseId: string, window: number): Prom
  *
  * Same rule as `approve` in the CLI: a prefix is how a human passes back an id they
  * read off a report, and quietly picking one of two matches would show a suite
- * nobody asked for. `id::text` is canonical lowercase with dashes, and `parse` has
- * already restricted the ref to hex and dashes — so the LIKE pattern cannot carry a
- * `%` or `_` that would widen it.
+ * nobody asked for. `parse` has already restricted the ref to hex and dashes, which
+ * is what keeps the LIKE pattern from carrying a `%` or `_` that would widen it.
  */
 async function resolveSuite(
   userId: string,
   ref: string
 ): Promise<{ suite: SuiteRow } | { error: string }> {
-  const matches = await sql<SuiteRow>(
-    `SELECT id, started_at, finished_at, model_id, git_sha,
-            total, passed, failed, skipped, roles
-       FROM agent_eval_suites
-      WHERE user_id = $1
-        AND id::text LIKE $2
-      ORDER BY started_at DESC, id DESC
-      LIMIT 6`,
-    [userId, `${ref}%`]
-  );
+  const matches = await suitesByRef(userId, ref);
 
   if (matches.length === 0) {
     return {
@@ -852,14 +689,7 @@ async function suiteDetail(userId: string, ref: string): Promise<number> {
   }
   const s = found.suite;
 
-  const rows = await sql<CaseRow>(
-    `SELECT case_id, question, passed, skipped, note, failures,
-            duration_ms, created_at, agent_run_id, suite_id
-       FROM agent_eval_runs
-      WHERE suite_id = $1
-      ORDER BY created_at ASC, id ASC`,
-    [s.id]
-  );
+  const rows = await suiteCases(s.id);
 
   out('');
   out(`Suite ${s.id}`);
@@ -926,77 +756,50 @@ async function suiteDetail(userId: string, ref: string): Promise<number> {
 /**
  * The failed assertions, in the runner's words.
  *
- * Read defensively, though the column is `NOT NULL DEFAULT '[]'::jsonb` and the
- * runner writes `[{ check, detail }]`. A reader that throws on one malformed row
- * hides every row after it, and the rows after it are the history — so an
- * unrecognised shape is printed as itself and labelled.
+ * `readFailures` does the reading — it is defensive, because `failures` is JSONB and
+ * a reader that throws on one malformed row hides every row after it, and the rows
+ * after it are the history. This function only decides what a terminal does with
+ * what came back: an indent, a clip, and a `?` rather than a `✗` on a shape that was
+ * not recognised, so an unfamiliar row cannot be mistaken for an assertion.
  */
 function failureLines(raw: unknown, indent: string, max: number): string[] {
-  if (raw === null || raw === undefined) return [];
-  if (!Array.isArray(raw)) {
-    return [`${indent}? failures stored in an unfamiliar shape: ${clip(JSON.stringify(raw), max)}`];
+  const { failures, unfamiliar } = readFailures(raw);
+  if (unfamiliar !== null) {
+    return [`${indent}? failures stored in an unfamiliar shape: ${clip(unfamiliar, max)}`];
   }
-  return raw.map((entry) => {
-    const f = (entry ?? {}) as { check?: unknown; detail?: unknown };
-    const check = typeof f.check === 'string' ? f.check : '(unnamed check)';
-    const detail =
-      typeof f.detail === 'string' ? f.detail : JSON.stringify(f.detail ?? entry ?? null);
-    return `${indent}✗ ${check} — ${clip(detail, max)}`;
-  });
+  return failures.map((f) => `${indent}✗ ${f.check} — ${clip(f.detail, max)}`);
 }
 
 /**
  * The stored binding, printed in the order `describeBinding` prints it.
  *
- * jsonb does not keep insertion order — it sorts keys by length and then bytewise —
- * so reading `Object.entries` straight out puts the roles in an order nobody chose.
- * The nine known roles come first, in their documented order, then anything else the
- * runner stored (`money`, `hours`, or a role added since).
+ * The ordering rule and the flattening are in `readBinding`, because both surfaces
+ * need them: jsonb does not keep insertion order — it sorts keys by length and then
+ * bytewise — so the nine known roles are put back into their documented order and
+ * anything else the runner stored follows.
  *
- * Nested values are flattened rather than skipped: the private version printed
- * `${role} ${name}` and rendered the money and hours facts as `[object Object]`,
- * which is the half of the binding the figure-based assertions were built from.
- *
- * Nothing is claimed about a role that is ABSENT from the stored object. The runner
- * stores what bound, so an absent role either did not bind or was not recorded, and
- * this cannot tell which — so it says so, once, instead of printing "unbound" nine
- * times as though it knew.
+ * Nothing is claimed here about a role that is ABSENT from the stored object, and
+ * the sentence saying so is `ABSENT_ROLE_MEANS` rather than a phrasing of this
+ * file's own. The same silence explained two ways in two places is how a reader
+ * learns that neither explanation was thought about.
  */
 function bindingLines(roles: unknown): string[] {
-  if (roles === null || roles === undefined) return ['    (no binding recorded)'];
-  if (typeof roles !== 'object' || Array.isArray(roles)) {
-    return [`    (the stored binding is not an object: ${clip(JSON.stringify(roles), 200)})`];
+  const binding = readBinding(roles);
+
+  if (binding.kind === 'none') return ['    (no binding recorded)'];
+  if (binding.kind === 'unfamiliar') {
+    return [`    (the stored binding is not an object: ${clip(binding.json, 200)})`];
   }
+  if (binding.kind === 'empty') return ['    (the binding was recorded as empty)'];
 
-  const stored = roles as Record<string, unknown>;
-  const keys = Object.keys(stored);
-  if (keys.length === 0) return ['    (the binding was recorded as empty)'];
-
-  const known = ROLES as readonly string[];
-  const ordered = [...known.filter((r) => keys.includes(r)), ...keys.filter((k) => !known.includes(k))];
-
-  const lines = ordered.map((key) => `    ${key.padEnd(22)} ${renderValue(stored[key])}`);
-
-  const absent = known.filter((r) => !keys.includes(r));
-  if (absent.length > 0) {
+  const lines = binding.rows.map((r) => `    ${r.role.padEnd(22)} ${r.value}`);
+  if (binding.absent.length > 0) {
     lines.push(
-      `    not in the stored binding: ${absent.join(', ')}`,
-      '    (the runner stores what bound, so these either did not bind or were not recorded)'
+      `    not in the stored binding: ${binding.absent.join(', ')}`,
+      `    (${ABSENT_ROLE_MEANS})`
     );
   }
   return lines;
-}
-
-/** A stored value as one line: a name as itself, a facts object as `key=value` pairs. */
-function renderValue(value: unknown): string {
-  if (typeof value === 'string') return value;
-  if (value === null || value === undefined) return 'null';
-  if (typeof value === 'object' && !Array.isArray(value)) {
-    return Object.entries(value as Record<string, unknown>)
-      .map(([k, v]) => `${k}=${v === null || typeof v === 'object' ? JSON.stringify(v) : String(v)}`)
-      .join('  ');
-  }
-  return JSON.stringify(value);
 }
 
 /* ─── entry ─── */

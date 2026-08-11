@@ -94,5 +94,85 @@ services:
       # retries, so a slow first boot is not reported as an unhealthy database.
       start_period: 40s
 
+  # ---------------------------------------------------------------------------
+  # The web UI: four surfaces over the same database.
+  #
+  # Here so that `docker compose up` gives a database AND something to read it
+  # with. Everything else in this repository still runs on the host under tsx —
+  # the CLI and the eval suite want your .env and your AWS profile — but a UI is
+  # the part somebody wants left running without a terminal open.
+  #
+  # Two consequences worth knowing before they cost an afternoon:
+  #
+  #   * `npm run db:up` is `docker compose up -d --wait`, so it now builds this
+  #     image as well. The first run therefore takes an npm install longer than
+  #     it used to. `docker compose up -d --wait db` brings up only the database.
+  #
+  #   * This service has no healthcheck on purpose (see the Dockerfile), so
+  #     --wait considers it ready as soon as it is running. A UI that has started
+  #     and cannot reach Postgres shows the reason on its own pages, which is
+  #     more use than a compose command that hangs.
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: business-agent-web
+
+    depends_on:
+      db:
+        # Not `depends_on: [db]`, which waits for the container to start rather
+        # than for the database to be usable. On a first boot the schema and the
+        # seed take tens of seconds, and a UI that starts in that window shows a
+        # relation-does-not-exist error on every page and reads as broken.
+        condition: service_healthy
+
+    environment:
+      # Written out rather than taken from the environment, and this is the trap
+      # in this file. Compose interpolates ${...} from the .env sitting next to
+      # it, and the DATABASE_URL in that file is
+      # `postgres://…@localhost:5433/…` — the HOST mapping. Inside this network
+      # the database is `db:5432`: localhost would be this container, and 5433 is
+      # not a port anything here listens on. `env_file: .env` is absent for the
+      # same reason.
+      DATABASE_URL: postgres://business_agent:business_agent@db:5432/business_agent
+
+      # These DO come from the host's environment or .env, because they should be
+      # the same values the CLI runs with — the UI must show the same operator's
+      # runs and approvals that `npm run ask` produces. The default is the
+      # deliberately fake uuid from .env.example, so the UI starts with no .env
+      # at all rather than exiting on a missing variable.
+      USER_ID: ${USER_ID:-00000000-0000-4000-8000-000000000001}
+
+      # Only the ask surface needs a model. The other three read Postgres, so the
+      # UI is useful with no key set at all — and a page that needs one says
+      # which variable is missing rather than failing blankly.
+      #
+      # PROVIDER=bedrock inside a container has no AWS profile and no instance
+      # role to fall back on: pass credentials explicitly or leave it on the
+      # anthropic adapter, which needs one key and plain fetch.
+      PROVIDER: ${PROVIDER:-anthropic}
+      MODEL: ${MODEL:-claude-opus-5}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      AWS_REGION: ${AWS_REGION:-}
+
+      PORT: "3000"
+      # See the long note in the Dockerfile: loopback inside a container is the
+      # container's own loopback, so binding it publishes nothing. The host-side
+      # publication below is what makes this local-only.
+      WEB_BIND: 0.0.0.0
+
+    ports:
+      # 127.0.0.1 explicitly, and this is the whole of the access control.
+      #
+      # `"3000:3000"` would bind every interface on the host, which on a laptop
+      # means every machine on the network can open the approvals page — and that
+      # page applies writes to the business. There is no authentication here and
+      # none is pretended, so the address is the guard.
+      - "127.0.0.1:3000:3000"
+
+    # No restart policy, deliberately. This process exits 2 when DATABASE_URL or
+    # USER_ID is wrong, and it prints the reason as one sentence; a container
+    # restarting forever buries that sentence under a hundred copies of itself.
+
 volumes:
   db-data:

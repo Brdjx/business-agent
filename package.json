@@ -13,16 +13,18 @@
     "node": ">=24"
   },
   "scripts": {
-    "db:up": "docker compose up -d --wait",
+    "db:up": "docker compose up -d --wait db",
     "db:down": "docker compose down",
-    "db:reset": "docker compose down -v && docker compose up -d --wait",
+    "db:reset": "docker compose down -v && docker compose up -d --wait db",
     "db:check": "docker compose exec -T db psql -v ON_ERROR_STOP=1 -U business_agent -d business_agent -f /dev/stdin < scripts/assert-roles.sql",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "ask": "tsx --env-file-if-exists=.env src/cli.ts",
     "eval": "tsx --env-file-if-exists=.env src/agent/evals/run.ts",
     "eval:history": "tsx --env-file-if-exists=.env src/agent/evals/history.ts",
-    "//env": "--env-file-if-exists rather than --env-file: the flag makes `cp .env.example .env` followed by `npm run ask` work, which is what the README tells a reader to do and what it did not do. The -if-exists form is used so the scripts still run for anyone who exports the variables instead, rather than failing on a file they never wanted."
+    "//env": "--env-file-if-exists rather than --env-file: the flag makes `cp .env.example .env` followed by `npm run ask` work, which is what the README tells a reader to do and what it did not do. The -if-exists form is used so the scripts still run for anyone who exports the variables instead, rather than failing on a file they never wanted.",
+    "up": "docker compose up -d --wait",
+    "web": "tsx --env-file-if-exists=.env src/web/server.ts"
   },
   "dependencies": {
     "pg": "^8.13.1"

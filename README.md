@@ -94,6 +94,28 @@ spends money on every commit stops being run.
 `npm run db:check` asserts that every eval role can bind against the database, and names
 the role and the reason when one cannot.
 
+### The UI
+
+The CLI shows all of this, but the consent flow is a visual thing — a card that says nothing
+has been changed, the facts it asserts, a refusal naming what moved, a trace with each step
+drawn where it ran. So there is a small server-rendered UI over the same functions:
+
+```bash
+npm run web        # http://127.0.0.1:3000
+npm run up         # or bring up Postgres and the UI together with compose
+```
+
+Four surfaces: **ask** streams a run as it happens and shows the evidence under the answer;
+**approvals** is the desk, where a write waits with the precondition it asserts; **runs** has
+the 30-day figures and every trace, with each step positioned on the run's timeline so tool
+calls the loop made together share a left edge; **evals** shows the recorded suites and which
+case has both passed and failed.
+
+It binds to loopback and has no authentication, deliberately — it can approve writes, and a
+login screen in front of a single-owner database is theatre that invites exposing the port.
+Every page footer says so. Setting `WEB_BIND=0.0.0.0` puts an unauthenticated approve button
+on your network, and the server tells you when you have.
+
 ### Asking it to change something
 
 A write never happens because you asked. It comes back as a proposal:
@@ -333,6 +355,7 @@ happened to be run twice by hand in one evening.
 | Writes: proposals, write-key ledger, precondition re-check | **in** |
 | Eval runner: role binding, mechanical assertions, recorded suites | **in** |
 | A CLI to ask it something: `npm run ask "..."` | **in** |
+| A web UI: ask, approval desk, runs and traces, eval history | **in** |
 
 Every row above has been run against a live model and the seeded database, not only
 written: the outputs quoted in this file are transcripts, including the refusals. Two
